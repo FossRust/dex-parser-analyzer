@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use petgraph::{graph::NodeIndex, visit::NodeIndexable, Direction};
+use petgraph::{Direction, graph::NodeIndex, visit::NodeIndexable};
 
 use crate::{
     bytecode::Instruction,

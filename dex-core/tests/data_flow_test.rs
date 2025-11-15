@@ -4,8 +4,7 @@ use dex_core::{
     analysis::data_flow::{self, AnalysisContext, ForwardAnalysis},
     bytecode::{Instruction, InstructionFormat},
     format::MethodIdx,
-    graphs,
-    parse_dex,
+    graphs, parse_dex,
 };
 
 struct OpcodeCollector;

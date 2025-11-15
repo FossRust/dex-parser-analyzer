@@ -4,11 +4,11 @@
 //! `dex-core` is the parsing, modeling, and program-graph foundation for the
 //! `dex-parser-analyzer` workspace.
 
+pub mod analysis;
 pub mod bytecode;
 pub mod dto;
 pub mod format;
 pub mod graphs;
-pub mod analysis;
 pub mod model;
 pub mod multidex;
 pub mod parser;
