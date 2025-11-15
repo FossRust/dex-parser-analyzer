@@ -29,9 +29,9 @@ pub fn App() -> impl IntoView {
     let (analysis_report, set_analysis_report) = create_signal(Option::<Rc<AnalysisReport>>::None);
 
     let on_file_change = {
-        let set_selected_file = set_selected_file.clone();
-        let set_selected_file_name = set_selected_file_name.clone();
-        let set_error = set_error.clone();
+        let set_selected_file = set_selected_file;
+        let set_selected_file_name = set_selected_file_name;
+        let set_error = set_error;
         move |ev: leptos::ev::Event| {
             let input: HtmlInputElement = event_target(&ev);
             if let Some(file_list) = input.files() {
@@ -157,7 +157,57 @@ pub fn App() -> impl IntoView {
                         }
                     }}
                 </div>
+                <DocumentationSection/>
             </main>
         </div>
+    }
+}
+
+const DEX_CORE_SNIPPET: &str = r#"use dex_core::{parse_dex, DexError};
+
+fn print_classes(bytes: &[u8]) -> Result<(), DexError> {
+    let dex = parse_dex(bytes)?;
+    println!("DEX version {}", dex.header().version);
+    for class in dex.classes() {
+        let descriptor = class.descriptor()?;
+        println!("class: {descriptor}");
+    }
+    Ok(())
+}"#;
+
+const DEX_ANALYSIS_SNIPPET: &str = r#"use dex_analysis::{config::AnalysisConfig, engine::analyze_dex};
+use dex_core::parse_dex;
+
+fn run_analysis(bytes: &[u8]) -> anyhow::Result<()> {
+    let dex = parse_dex(bytes)?;
+    let report = analyze_dex(&dex, &AnalysisConfig::default());
+    for finding in report.findings {
+        println!("{:?}: {}", finding.severity, finding.message);
+    }
+    Ok(())
+}"#;
+
+const DEX_CLI_SNIPPET: &str = r#"cargo run -p dex-cli -- path/to/classes.dex --max-findings 25"#;
+
+#[component]
+fn DocumentationSection() -> impl IntoView {
+    view! {
+        <section class="docs-section">
+            <h2>"Sample Usage"</h2>
+            <div class="docs-grid">
+                <article>
+                    <h3>"dex-core"</h3>
+                    <pre><code>{DEX_CORE_SNIPPET}</code></pre>
+                </article>
+                <article>
+                    <h3>"dex-analysis"</h3>
+                    <pre><code>{DEX_ANALYSIS_SNIPPET}</code></pre>
+                </article>
+                <article>
+                    <h3>"dex-cli"</h3>
+                    <pre><code>{DEX_CLI_SNIPPET}</code></pre>
+                </article>
+            </div>
+        </section>
     }
 }

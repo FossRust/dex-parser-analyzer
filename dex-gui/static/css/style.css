@@ -146,3 +146,25 @@ td {
     border-radius: 0.5rem;
     overflow-x: auto;
 }
+
+.docs-section {
+    margin-top: 2rem;
+    background: #f1f5f9;
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+}
+
+.docs-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.docs-grid pre {
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 1rem;
+    border-radius: 0.5rem;
+    overflow-x: auto;
+}
