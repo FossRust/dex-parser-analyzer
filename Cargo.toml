@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "dex-analysis",
+    "dex-analysis", "dex-cli",
     "dex-core",
     "dex-gui",
 ]
