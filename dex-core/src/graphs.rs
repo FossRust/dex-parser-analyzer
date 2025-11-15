@@ -1,5 +1,7 @@
 //! Graph construction utilities (CFG, call graph, and xrefs).
 
+use std::collections::HashMap;
+
 use petgraph::graph::Graph;
 use serde::{Deserialize, Serialize};
 
@@ -43,10 +45,36 @@ pub fn build_method_cfg(dex: &DexFile<'_>, method: MethodIdx) -> DexResult<Cfg> 
         .last()
         .map(|ins| ins.pc + ins.code_units() as u32)
         .unwrap_or(start);
-    graph.add_node(BasicBlock {
+    let entry = graph.add_node(BasicBlock {
         start_pc: start,
         end_pc: end,
     });
+
+    if let Some(code_item) = dex.code_item(method) {
+        let mut handler_nodes: HashMap<u32, petgraph::graph::NodeIndex> = HashMap::new();
+        for try_item in &code_item.tries {
+            if let Some(handler) = code_item.handler_for_offset(u32::from(try_item.handler_off)) {
+                for typed in &handler.handlers {
+                    let node = *handler_nodes.entry(typed.addr).or_insert_with(|| {
+                        graph.add_node(BasicBlock {
+                            start_pc: typed.addr,
+                            end_pc: typed.addr,
+                        })
+                    });
+                    graph.add_edge(entry, node, ());
+                }
+                if let Some(addr) = handler.catch_all_addr {
+                    let node = *handler_nodes.entry(addr).or_insert_with(|| {
+                        graph.add_node(BasicBlock {
+                            start_pc: addr,
+                            end_pc: addr,
+                        })
+                    });
+                    graph.add_edge(entry, node, ());
+                }
+            }
+        }
+    }
     Ok(graph)
 }
 

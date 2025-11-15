@@ -465,11 +465,15 @@ fn parse_code_item<'a>(bytes: &'a [u8], offset: u32) -> DexResult<CodeItem<'a>> 
     }
 
     let mut handlers = Vec::new();
+    let mut handler_offsets = Vec::new();
     if tries_size > 0 {
         let (handler_count, used) = read_uleb128(&bytes[cursor..], "encoded_catch_handler_list")?;
         cursor += used;
+        let handlers_base = cursor;
         for _ in 0..handler_count {
+            let relative = (cursor - handlers_base) as u32;
             handlers.push(parse_catch_handler(bytes, &mut cursor)?);
+            handler_offsets.push(relative);
         }
     }
 
@@ -483,6 +487,7 @@ fn parse_code_item<'a>(bytes: &'a [u8], offset: u32) -> DexResult<CodeItem<'a>> 
         insns,
         tries,
         handlers,
+        handler_offsets,
     })
 }
 

@@ -627,6 +627,7 @@ mod tests {
             insns: bytes,
             tries: Vec::new(),
             handlers: Vec::new(),
+            handler_offsets: Vec::new(),
         }
     }
 

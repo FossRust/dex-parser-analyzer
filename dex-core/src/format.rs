@@ -244,6 +244,17 @@ pub struct CodeItem<'a> {
     pub insns: &'a [u8],
     pub tries: Vec<TryItem>,
     pub handlers: Vec<EncodedCatchHandler>,
+    pub handler_offsets: Vec<u32>,
+}
+
+impl<'a> CodeItem<'a> {
+    /// Returns the catch handler associated with the given offset.
+    pub fn handler_for_offset(&self, offset: u32) -> Option<&EncodedCatchHandler> {
+        self.handler_offsets
+            .iter()
+            .position(|off| *off == offset)
+            .and_then(|idx| self.handlers.get(idx))
+    }
 }
 
 /// Field entry inside a `class_data_item`.
