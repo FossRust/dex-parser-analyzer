@@ -47,6 +47,8 @@ define_index!(ProtoIdx);
 define_index!(FieldIdx);
 define_index!(MethodIdx);
 define_index!(ClassIdx);
+define_index!(CallSiteIdx);
+define_index!(MethodHandleIdx);
 
 /// Representation of the DEX header (`header_item`).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

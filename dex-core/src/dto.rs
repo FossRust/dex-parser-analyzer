@@ -28,8 +28,12 @@ pub struct DtoClass {
 pub struct DtoInstruction {
     pub pc: u32,
     pub opcode: u8,
-    pub width: u8,
-    pub operands: Vec<u16>,
+    pub name: String,
+    pub format: String,
+    pub registers: Vec<u16>,
+    pub literal: Option<i64>,
+    pub offset: Option<i32>,
+    pub reference: Option<DtoReference>,
 }
 
 /// Simple CFG DTO with a list of nodes and adjacency.
@@ -61,6 +65,13 @@ pub struct DtoXrefs {
     pub method_strings: Vec<(u32, u32)>,
 }
 
+/// Metadata about an indexed reference used by an instruction.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DtoReference {
+    pub kind: String,
+    pub index: u32,
+}
+
 /// Convert a method handle into a DTO.
 pub fn method_to_dto(method: &MethodHandle<'_>) -> DexResult<DtoMethod> {
     let class_desc = method
@@ -86,11 +97,21 @@ pub fn class_to_dto(class: &ClassHandle<'_>) -> DexResult<DtoClass> {
 pub fn instructions_to_dto(instructions: &[Instruction]) -> Vec<DtoInstruction> {
     instructions
         .iter()
-        .map(|ins| DtoInstruction {
-            pc: ins.pc,
-            opcode: ins.opcode,
-            width: ins.width,
-            operands: ins.operands.clone(),
+        .map(|ins| {
+            let reference = ins.reference.as_ref().map(|reference| DtoReference {
+                kind: reference.kind_label().to_string(),
+                index: reference.index(),
+            });
+            DtoInstruction {
+                pc: ins.pc,
+                opcode: ins.opcode,
+                name: ins.name.to_string(),
+                format: format!("{:?}", ins.format),
+                registers: ins.registers.iter().copied().collect(),
+                literal: ins.literal,
+                offset: ins.offset,
+                reference,
+            }
         })
         .collect()
 }

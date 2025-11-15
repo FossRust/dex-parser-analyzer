@@ -4,7 +4,7 @@ use petgraph::graph::Graph;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bytecode::Instruction,
+    bytecode::Reference,
     dto::{DtoBasicBlock, DtoCfg},
     error::DexResult,
     format::MethodIdx,
@@ -41,7 +41,7 @@ pub fn build_method_cfg(dex: &DexFile<'_>, method: MethodIdx) -> DexResult<Cfg> 
     let start = instructions.first().map(|ins| ins.pc).unwrap_or(0);
     let end = instructions
         .last()
-        .map(|ins| ins.pc + u32::from(ins.width) / 2)
+        .map(|ins| ins.pc + ins.code_units() as u32)
         .unwrap_or(start);
     graph.add_node(BasicBlock {
         start_pc: start,
@@ -87,7 +87,7 @@ pub fn build_call_graph(dex: &DexFile<'_>) -> DexResult<CallGraph> {
         };
         for ins in instructions {
             if is_invoke(ins.opcode) {
-                if let Some(target) = decode_target_index(&ins, dex.method_count()) {
+                if let Some(target) = method_reference(&ins.reference, dex.method_count()) {
                     graph.add_edge(*node, nodes[target], ());
                 }
             }
@@ -108,14 +108,12 @@ pub fn build_xrefs(dex: &DexFile<'_>) -> DexResult<Xrefs> {
         };
         for ins in &instructions {
             if is_invoke(ins.opcode) {
-                if let Some(target) = decode_target_index(ins, dex.method_count()) {
+                if let Some(target) = method_reference(&ins.reference, dex.method_count()) {
                     xrefs.method_calls.push((idx as u32, target as u32));
                 }
-            } else if is_const_string(ins.opcode) {
-                if let Some(string_idx) = ins.operands.first() {
-                    xrefs
-                        .method_strings
-                        .push((idx as u32, u32::from(*string_idx)));
+            } else if matches!(ins.reference, Some(Reference::String(_))) {
+                if let Some(string_idx) = string_reference(&ins.reference) {
+                    xrefs.method_strings.push((idx as u32, string_idx));
                 }
             }
         }
@@ -127,13 +125,19 @@ fn is_invoke(opcode: u8) -> bool {
     matches!(opcode, 0x6e..=0x72 | 0x74..=0x78)
 }
 
-fn is_const_string(opcode: u8) -> bool {
-    matches!(opcode, 0x1a | 0x1b)
+fn method_reference(reference: &Option<Reference>, method_count: usize) -> Option<usize> {
+    match reference {
+        Some(Reference::Method(idx)) => {
+            let raw = idx.raw() as usize;
+            (raw < method_count).then_some(raw)
+        }
+        _ => None,
+    }
 }
 
-fn decode_target_index(ins: &Instruction, method_count: usize) -> Option<usize> {
-    ins.operands
-        .last()
-        .map(|value| usize::from(*value))
-        .filter(|idx| *idx < method_count)
+fn string_reference(reference: &Option<Reference>) -> Option<u32> {
+    match reference {
+        Some(Reference::String(idx)) => Some(idx.raw()),
+        _ => None,
+    }
 }
