@@ -14,6 +14,10 @@ use crate::{
 };
 
 /// Central data structure representing a parsed `.dex` file.
+///
+/// `DexFile` keeps a reference to the original byte buffer and exposes
+/// higher-level handles for strings, types, classes, and methods. All lookups
+/// are zero-copy and indexed via the strong newtypes defined in `format`.
 pub struct DexFile<'a> {
     pub(crate) data: &'a [u8],
     header: DexHeader,
