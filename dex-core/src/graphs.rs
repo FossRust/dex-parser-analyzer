@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     bytecode::{Instruction, InstructionFormat, Reference, SwitchPayload},
-    dto::{DtoBasicBlock, DtoCfg},
+    dto::{DtoBasicBlock, DtoCallGraph, DtoCfg, DtoXrefs},
     error::DexResult,
     format::{CodeItem, MethodIdx},
     model::DexFile,
@@ -52,11 +52,24 @@ pub struct Xrefs {
 /// The builder now emits a node per basic block, tracking conditional edges,
 /// switch edges, fallthroughs, gotos, and exception handlers.
 pub fn build_method_cfg(dex: &DexFile<'_>, method: MethodIdx) -> DexResult<Cfg> {
+    let (cfg, _) = build_method_cfg_with_instructions(dex, method)?;
+    Ok(cfg)
+}
+
+/// Build a CFG alongside the decoded instruction stream.
+///
+/// This helper avoids double-decoding bytecode for analyses that need both the
+/// graph structure and the original instructions (e.g., data-flow passes).
+pub fn build_method_cfg_with_instructions(
+    dex: &DexFile<'_>,
+    method: MethodIdx,
+) -> DexResult<(Cfg, Vec<Instruction>)> {
     let Some(code_item) = dex.code_item(method) else {
-        return Ok(Graph::new());
+        return Ok((Graph::new(), Vec::new()));
     };
     let instructions = dex.decode_instructions(method)?;
-    Ok(build_cfg_from_parts(code_item, &instructions))
+    let cfg = build_cfg_from_parts(code_item, &instructions);
+    Ok((cfg, instructions))
 }
 
 fn build_cfg_from_parts(code_item: &CodeItem<'_>, instructions: &[Instruction]) -> Cfg {
@@ -356,6 +369,19 @@ pub fn build_call_graph(dex: &DexFile<'_>) -> DexResult<CallGraph> {
     Ok(graph)
 }
 
+/// Convert a call graph into the DTO representation.
+pub fn call_graph_to_dto(graph: &CallGraph) -> DtoCallGraph {
+    let nodes = graph.node_indices().map(|node| graph[node]).collect();
+    let edges = graph
+        .edge_indices()
+        .map(|edge| {
+            let (a, b) = graph.edge_endpoints(edge).expect("edge endpoints");
+            (a.index() as u32, b.index() as u32)
+        })
+        .collect();
+    DtoCallGraph { nodes, edges }
+}
+
 /// Build simplified cross-reference data.
 ///
 /// Returns the `(caller, callee)` pairs for all invocations found in the file
@@ -384,6 +410,19 @@ pub fn build_xrefs(dex: &DexFile<'_>) -> DexResult<Xrefs> {
         }
     }
     Ok(xrefs)
+}
+
+/// Convert the xref database into its DTO representation.
+pub fn xrefs_to_dto(xrefs: &Xrefs) -> DtoXrefs {
+    DtoXrefs {
+        method_calls: xrefs.method_calls.clone(),
+        method_strings: xrefs.method_strings.clone(),
+        method_fields: xrefs.method_fields.clone(),
+        method_types: xrefs.method_types.clone(),
+        method_protos: xrefs.method_protos.clone(),
+        method_call_sites: xrefs.method_call_sites.clone(),
+        method_method_handles: xrefs.method_method_handles.clone(),
+    }
 }
 
 fn is_invoke(opcode: u8) -> bool {

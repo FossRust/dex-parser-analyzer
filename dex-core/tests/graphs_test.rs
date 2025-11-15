@@ -54,6 +54,27 @@ fn xrefs_capture_multiple_reference_types() {
     );
 }
 
+#[test]
+fn call_graph_dto_exposes_nodes_and_edges() {
+    let bytes = load_fixture("Test.dex");
+    let dex = parse_dex(&bytes).expect("parse");
+    let cg = graphs::build_call_graph(&dex).expect("call graph");
+    let dto = graphs::call_graph_to_dto(&cg);
+    assert_eq!(dto.nodes.len(), dex.method_count());
+    assert_eq!(dto.edges.len(), cg.edge_count());
+}
+
+#[test]
+fn xrefs_dto_clones_relationships() {
+    let bytes = load_fixture("FieldsTest.dex");
+    let dex = parse_dex(&bytes).expect("parse");
+    let xrefs = graphs::build_xrefs(&dex).expect("xrefs");
+    let dto = graphs::xrefs_to_dto(&xrefs);
+    assert_eq!(dto.method_calls.len(), xrefs.method_calls.len());
+    assert_eq!(dto.method_fields.len(), xrefs.method_fields.len());
+    assert_eq!(dto.method_types.len(), xrefs.method_types.len());
+}
+
 fn find_branch_method(dex: &dex_core::DexFile<'_>) -> Option<dex_core::format::MethodIdx> {
     for class in dex.classes() {
         if let Some(methods) = class.methods() {

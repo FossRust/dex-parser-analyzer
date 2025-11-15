@@ -24,6 +24,7 @@ The GUI must be architected to serve as the visualization layer for two distinct
    * **Control-Flow Graphs (CFGs):** Visual representations of the logical flow within individual methods.  
    * **Call Graphs:** Application-wide graphs visualizing the relationships *between* all methods.  
    * **Data-Flow & Taint Analysis:** Overlays onto the CFGs and call graphs that illustrate vulnerability data, such as the flow of "tainted" data from a source to a sink.  
+   These views now consume the serde-friendly DTOs exported by `dex_core::dto` (`DtoCfg`, `DtoCallGraph`, `DtoXrefs`), so both the CLI analyzer and GUI can hydrate identical graph/xref snapshots without touching `petgraph` internals.  
 3. **Custom Widget Requirements:** Standard HTML widgets (buttons, text fields, tables) are insufficient for this data. The application demands a suite of high-performance, custom-built components, including:  
    * A performant, virtualized Hex Editor for raw file and memory inspection.  
    * A "Disassembly View" with syntax highlighting, line-based interactivity, and breakpoint indicators.  
