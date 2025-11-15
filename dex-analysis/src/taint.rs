@@ -55,6 +55,14 @@ const SOURCES: &[MethodPattern] = &[
         description: "Settings.Secure.getString",
         taint_args: &[],
     },
+    MethodPattern {
+        id: "SRC_BUNDLE_STRING",
+        class: "Landroid/os/Bundle;",
+        name: "getString",
+        signature: "(Ljava/lang/String;)Ljava/lang/String;",
+        description: "Bundle.getString",
+        taint_args: &[],
+    },
 ];
 
 const SINKS: &[MethodPattern] = &[
@@ -90,6 +98,30 @@ const SINKS: &[MethodPattern] = &[
         description: "WebView.loadUrl",
         taint_args: &[0],
     },
+    MethodPattern {
+        id: "SNK_SQLITE_EXEC",
+        class: "Landroid/database/sqlite/SQLiteDatabase;",
+        name: "execSQL",
+        signature: "(Ljava/lang/String;)V",
+        description: "SQLiteDatabase.execSQL",
+        taint_args: &[1],
+    },
+    MethodPattern {
+        id: "SNK_SQLITE_RAW_QUERY",
+        class: "Landroid/database/sqlite/SQLiteDatabase;",
+        name: "rawQuery",
+        signature: "(Ljava/lang/String;[Ljava/lang/String;)Landroid/database/Cursor;",
+        description: "SQLiteDatabase.rawQuery",
+        taint_args: &[1],
+    },
+    MethodPattern {
+        id: "SNK_RUNTIME_EXEC",
+        class: "Ljava/lang/Runtime;",
+        name: "exec",
+        signature: "(Ljava/lang/String;)Ljava/lang/Process;",
+        description: "Runtime.exec",
+        taint_args: &[1],
+    },
 ];
 
 struct PassthroughPattern {
@@ -111,6 +143,18 @@ const PASSTHROUGH_METHODS: &[PassthroughPattern] = &[
         name: "toString",
         signature: "()Ljava/lang/String;",
         propagate_from: &[0],
+    },
+    PassthroughPattern {
+        class: "Ljava/lang/StringBuilder;",
+        name: "append",
+        signature: "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+        propagate_from: &[0, 1],
+    },
+    PassthroughPattern {
+        class: "Ljava/lang/StringBuilder;",
+        name: "append",
+        signature: "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+        propagate_from: &[0, 1],
     },
 ];
 

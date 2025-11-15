@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use dex_core::{bytecode::Reference, format::MethodIdx, model::DexFile};
 use serde_json::json;
 
@@ -23,9 +25,11 @@ pub fn run_structural_checks(
             continue;
         }
         let mut web = WebViewState::default();
+        let mut literals = LiteralTracker::default();
         let method_summary = describe_method(dex, method_idx);
         let mut calls_ssl_proceed = false;
         for inst in &instructions {
+            literals.observe(inst);
             if let Some(target) = inst
                 .reference
                 .as_ref()
@@ -52,6 +56,47 @@ pub fn run_structural_checks(
                     }
                     ("Landroid/webkit/SslErrorHandler;", "proceed", "()V") => {
                         calls_ssl_proceed = true;
+                    }
+                    (
+                        "Landroid/content/Context;",
+                        "openFileOutput",
+                        "(Ljava/lang/String;I)Ljava/io/FileOutputStream;",
+                    ) => {
+                        if let Some(mode_reg) = inst.registers.get(2) {
+                            if literals.is_world_mode(*mode_reg) {
+                                findings.push(Finding {
+                                    id: "M9_INSECURE_FILE_MODE".into(),
+                                    kind: VulnerabilityKind::Custom("InsecureFileMode".into()),
+                                    severity: Severity::Medium,
+                                    location: Location::from_method(dex, method_idx, Some(inst.pc)),
+                                    message: "openFileOutput with MODE_WORLD_* flag detected"
+                                        .to_string(),
+                                    extra: json!({
+                                        "mode_literal": literals.literal(*mode_reg),
+                                    }),
+                                });
+                            }
+                        }
+                    }
+                    ("Ljava/lang/Runtime;", "exec", _) => {
+                        findings.push(Finding {
+                            id: "M1_RUNTIME_EXEC".into(),
+                            kind: VulnerabilityKind::Custom("RuntimeExec".into()),
+                            severity: Severity::High,
+                            location: Location::from_method(dex, method_idx, Some(inst.pc)),
+                            message: "Runtime.exec invocation detected".to_string(),
+                            extra: json!({ "signature": summary.signature }),
+                        });
+                    }
+                    ("Ljava/lang/ProcessBuilder;", "<init>", _) => {
+                        findings.push(Finding {
+                            id: "M1_PROCESS_BUILDER".into(),
+                            kind: VulnerabilityKind::Custom("ProcessBuilderExec".into()),
+                            severity: Severity::High,
+                            location: Location::from_method(dex, method_idx, Some(inst.pc)),
+                            message: "ProcessBuilder constructor detected".to_string(),
+                            extra: json!({ "signature": summary.signature }),
+                        });
                     }
                     _ => {}
                 }
@@ -122,6 +167,52 @@ struct WebViewState {
     javascript_interface_pc: Option<u32>,
     file_access_pc: Option<u32>,
 }
+
+#[derive(Default)]
+struct LiteralTracker {
+    values: HashMap<u16, i64>,
+}
+
+impl LiteralTracker {
+    fn observe(&mut self, inst: &dex_core::bytecode::Instruction) {
+        let name = inst.name;
+        if name.starts_with("const") {
+            if let (Some(&dst), Some(value)) = (inst.registers.get(0), inst.literal) {
+                self.values.insert(dst, value);
+            }
+            return;
+        }
+        if name.starts_with("move") {
+            if let (Some(&dst), Some(&src)) = (inst.registers.get(0), inst.registers.get(1)) {
+                if let Some(value) = self.values.get(&src).copied() {
+                    self.values.insert(dst, value);
+                } else {
+                    self.values.remove(&dst);
+                }
+            }
+            return;
+        }
+        if name.starts_with("return") {
+            if let Some(&reg) = inst.registers.get(0) {
+                self.values.remove(&reg);
+            }
+        }
+    }
+
+    fn literal(&self, reg: u16) -> Option<i64> {
+        self.values.get(&reg).copied()
+    }
+
+    fn is_world_mode(&self, reg: u16) -> bool {
+        matches!(
+            self.literal(reg),
+            Some(LITERAL_MODE_WORLD_READABLE) | Some(LITERAL_MODE_WORLD_WRITEABLE)
+        )
+    }
+}
+
+const LITERAL_MODE_WORLD_READABLE: i64 = 0x0001;
+const LITERAL_MODE_WORLD_WRITEABLE: i64 = 0x0002;
 
 const SSL_OVERRIDE_SIGNATURE: &str =
     "(Landroid/webkit/WebView;Landroid/webkit/SslErrorHandler;Landroid/net/http/SslError;)V";
