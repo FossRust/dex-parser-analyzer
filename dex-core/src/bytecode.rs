@@ -38,6 +38,9 @@ pub struct Instruction {
     /// Raw bytes for instructions whose format isn't fully decoded yet.
     pub raw: Option<Vec<u8>>,
     reference_kind: ReferenceType,
+    reference_kind2: ReferenceType,
+    /// Optional secondary reference (used by call-site/method-proto aware formats).
+    pub secondary_reference: Option<Reference>,
 }
 
 impl Instruction {
@@ -51,11 +54,13 @@ impl Instruction {
             literal: None,
             offset: None,
             reference: None,
+            secondary_reference: None,
             range: None,
             switch: None,
             array: None,
             raw: None,
             reference_kind: info.reference,
+            reference_kind2: info.reference2,
         }
     }
 
@@ -74,6 +79,8 @@ impl Instruction {
             array: None,
             raw: None,
             reference_kind: ReferenceType::None,
+            reference_kind2: ReferenceType::None,
+            secondary_reference: None,
         }
     }
 
@@ -114,10 +121,10 @@ pub struct ArrayPayload {
 
 /// Public helper for decoding instructions from a [`CodeItem`].
 pub fn decode_instructions<'a>(
-    dex: &DexFile<'a>,
+    _dex: &DexFile<'a>,
     code_item: &CodeItem<'a>,
 ) -> DexResult<Vec<Instruction>> {
-    decode_stream(dex, code_item)
+    decode_stream(code_item)
 }
 
 pub(crate) fn decode_instructions_internal<'a>(
@@ -128,10 +135,10 @@ pub(crate) fn decode_instructions_internal<'a>(
         context: "method",
         message: "method is abstract or native",
     })?;
-    decode_stream(dex, code)
+    decode_stream(code)
 }
 
-fn decode_stream(_dex: &DexFile<'_>, code_item: &CodeItem<'_>) -> DexResult<Vec<Instruction>> {
+fn decode_stream(code_item: &CodeItem<'_>) -> DexResult<Vec<Instruction>> {
     let total_units = code_item.insns_size as usize;
     let bytes = code_item.insns;
     let expected_len = total_units * 2;
@@ -285,10 +292,28 @@ fn decode_format(
             inst.registers.push(read_u8(bytes, start + 1)? as u16);
             let offset = read_i32(bytes, start + 2)?;
             inst.offset = Some(offset);
-            let payload_pc = ((pc_units as i32) + offset) as usize;
-            inst.switch = parse_switch_payload(bytes, inst.name, payload_pc, total_units)?;
-            if inst.name == "FILL_ARRAY_DATA" {
-                inst.array = parse_array_payload(bytes, payload_pc, total_units)?;
+            let payload_pc = compute_payload_pc(pc_units, offset, total_units)?;
+            match inst.opcode {
+                0x2b => {
+                    inst.switch = Some(parse_switch_payload(
+                        bytes,
+                        payload_pc,
+                        total_units,
+                        SwitchKind::Packed,
+                    )?);
+                }
+                0x2c => {
+                    inst.switch = Some(parse_switch_payload(
+                        bytes,
+                        payload_pc,
+                        total_units,
+                        SwitchKind::Sparse,
+                    )?);
+                }
+                0x26 => {
+                    inst.array = Some(parse_array_payload(bytes, payload_pc, total_units)?);
+                }
+                _ => {}
             }
         }
         InstructionFormat::Format32x => {
@@ -296,6 +321,8 @@ fn decode_format(
                 .extend_from_slice(&[read_u16(bytes, start + 2)?, read_u16(bytes, start + 4)?]);
         }
         InstructionFormat::Format35c => decode_format_35c(inst, bytes, start)?,
+        InstructionFormat::Format45cc => decode_format_45cc(inst, bytes, start)?,
+        InstructionFormat::Format4rcc => decode_format_4rcc(inst, bytes, start)?,
         InstructionFormat::Format3rc => {
             let count = read_u8(bytes, start + 1)? as u16;
             inst.range = Some(RangeInfo {
@@ -335,6 +362,44 @@ fn decode_format_35c(inst: &mut Instruction, bytes: &[u8], start: usize) -> DexR
     for reg in regs.iter().take(reg_count) {
         inst.registers.push(*reg);
     }
+    Ok(())
+}
+
+fn decode_format_45cc(inst: &mut Instruction, bytes: &[u8], start: usize) -> DexResult<()> {
+    let byte1 = read_u8(bytes, start + 1)?;
+    let reg_count = (byte1 >> 4) as usize;
+    let reg_g = byte1 & 0x0F;
+    let primary_idx = read_u16(bytes, start + 2)? as u32;
+    inst.reference = decode_reference(inst.reference_kind, primary_idx);
+
+    let cd = read_u8(bytes, start + 4)?;
+    let ef = read_u8(bytes, start + 5)?;
+    let regs = [
+        (cd & 0x0F) as u16,
+        (cd >> 4) as u16,
+        (ef & 0x0F) as u16,
+        (ef >> 4) as u16,
+        reg_g as u16,
+    ];
+    for reg in regs.iter().take(reg_count) {
+        inst.registers.push(*reg);
+    }
+
+    let secondary_idx = read_u16(bytes, start + 6)? as u32;
+    inst.secondary_reference = decode_reference(inst.reference_kind2, secondary_idx);
+    Ok(())
+}
+
+fn decode_format_4rcc(inst: &mut Instruction, bytes: &[u8], start: usize) -> DexResult<()> {
+    let count = read_u8(bytes, start + 1)? as u16;
+    inst.range = Some(RangeInfo {
+        start: read_u16(bytes, start + 4)?,
+        count,
+    });
+    let primary_idx = read_u16(bytes, start + 2)? as u32;
+    inst.reference = decode_reference(inst.reference_kind, primary_idx);
+    let secondary_idx = read_u16(bytes, start + 6)? as u32;
+    inst.secondary_reference = decode_reference(inst.reference_kind2, secondary_idx);
     Ok(())
 }
 
@@ -395,12 +460,25 @@ fn decode_payload(
             );
             let element_width = read_u16(bytes, start + 2)?;
             let size = read_u32(bytes, start + 4)?;
-            let data_bytes = (element_width as usize) * (size as usize);
+            let data_bytes =
+                (element_width as usize)
+                    .checked_mul(size as usize)
+                    .ok_or(DexError::Malformed {
+                        context: "fill-array",
+                        message: "payload size overflow",
+                    })?;
             let data_end = start + 8 + data_bytes;
+            let data = bytes
+                .get(start + 8..data_end)
+                .ok_or(DexError::Malformed {
+                    context: "fill-array",
+                    message: "payload truncated",
+                })?
+                .to_vec();
             inst.array = Some(ArrayPayload {
                 element_width,
                 size,
-                data: bytes[start + 8..data_end].to_vec(),
+                data,
             });
             let padded_end = if data_bytes % 2 == 0 {
                 data_end
@@ -414,12 +492,35 @@ fn decode_payload(
     }
 }
 
+fn compute_payload_pc(pc_units: usize, offset: i32, total_units: usize) -> DexResult<usize> {
+    let target = (pc_units as isize) + (offset as isize);
+    if target < 0 {
+        return Err(DexError::Malformed {
+            context: "payload",
+            message: "payload offset underflow",
+        });
+    }
+    let target = target as usize;
+    if target >= total_units {
+        return Err(DexError::Malformed {
+            context: "payload",
+            message: "payload offset out of range",
+        });
+    }
+    Ok(target)
+}
+
+enum SwitchKind {
+    Packed,
+    Sparse,
+}
+
 fn parse_switch_payload(
     bytes: &[u8],
-    opcode_name: &str,
     payload_pc: usize,
     total_units: usize,
-) -> DexResult<Option<SwitchPayload>> {
+    kind: SwitchKind,
+) -> DexResult<SwitchPayload> {
     if payload_pc >= total_units {
         return Err(DexError::Malformed {
             context: "switch",
@@ -427,9 +528,15 @@ fn parse_switch_payload(
         });
     }
     let byte_offset = payload_pc * 2;
-    let first_word = read_u16(bytes, byte_offset)?;
-    match (first_word >> 8, opcode_name) {
-        (0x01, "PACKED_SWITCH") => {
+    let ident = read_u16(bytes, byte_offset)?;
+    match kind {
+        SwitchKind::Packed => {
+            if ident != 0x0100 {
+                return Err(DexError::Malformed {
+                    context: "packed-switch",
+                    message: "payload ident mismatch",
+                });
+            }
             let size = read_u16(bytes, byte_offset + 2)? as usize;
             let first_key = read_i32(bytes, byte_offset + 4)?;
             let mut targets = Vec::with_capacity(size);
@@ -438,9 +545,15 @@ fn parse_switch_payload(
                 targets.push(read_i32(bytes, off)?);
                 off += 4;
             }
-            Ok(Some(SwitchPayload::Packed { first_key, targets }))
+            Ok(SwitchPayload::Packed { first_key, targets })
         }
-        (0x02, "SPARSE_SWITCH") => {
+        SwitchKind::Sparse => {
+            if ident != 0x0200 {
+                return Err(DexError::Malformed {
+                    context: "sparse-switch",
+                    message: "payload ident mismatch",
+                });
+            }
             let size = read_u16(bytes, byte_offset + 2)? as usize;
             let mut cases = Vec::with_capacity(size);
             let mut keys_off = byte_offset + 4;
@@ -450,9 +563,8 @@ fn parse_switch_payload(
                 keys_off += 4;
                 targets_off += 4;
             }
-            Ok(Some(SwitchPayload::Sparse { cases }))
+            Ok(SwitchPayload::Sparse { cases })
         }
-        _ => Ok(None),
     }
 }
 
@@ -460,24 +572,201 @@ fn parse_array_payload(
     bytes: &[u8],
     payload_pc: usize,
     total_units: usize,
-) -> DexResult<Option<ArrayPayload>> {
+) -> DexResult<ArrayPayload> {
     if payload_pc >= total_units {
-        return Ok(None);
+        return Err(DexError::Malformed {
+            context: "fill-array",
+            message: "payload offset out of range",
+        });
     }
     let offset = payload_pc * 2;
-    let first_word = read_u16(bytes, offset)?;
-    if first_word >> 8 != 0x03 {
-        return Ok(None);
+    let ident = read_u16(bytes, offset)?;
+    if ident != 0x0300 {
+        return Err(DexError::Malformed {
+            context: "fill-array",
+            message: "payload ident mismatch",
+        });
     }
     let element_width = read_u16(bytes, offset + 2)?;
     let size = read_u32(bytes, offset + 4)?;
-    let data_bytes = (element_width as usize) * (size as usize);
+    let data_bytes =
+        (element_width as usize)
+            .checked_mul(size as usize)
+            .ok_or(DexError::Malformed {
+                context: "fill-array",
+                message: "payload size overflow",
+            })?;
     let end = offset + 8 + data_bytes;
-    Ok(Some(ArrayPayload {
+    let data = bytes
+        .get(offset + 8..end)
+        .ok_or(DexError::Malformed {
+            context: "fill-array",
+            message: "payload truncated",
+        })?
+        .to_vec();
+    Ok(ArrayPayload {
         element_width,
         size,
-        data: bytes[offset + 8..end].to_vec(),
-    }))
+        data,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::CodeItem;
+
+    fn code_item_from_bytes(bytes: &'static [u8]) -> CodeItem<'static> {
+        CodeItem {
+            registers_size: 0,
+            ins_size: 0,
+            outs_size: 0,
+            tries_size: 0,
+            debug_info_off: 0,
+            insns_size: (bytes.len() / 2) as u32,
+            insns: bytes,
+            tries: Vec::new(),
+            handlers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn decode_format45cc_dual_reference() {
+        static BYTES: [u8; 8] = [0xfa, 0x21, 0x34, 0x12, 0x43, 0x65, 0x78, 0x56];
+        let code = code_item_from_bytes(&BYTES);
+        let instructions = super::decode_stream(&code).expect("decode");
+        assert_eq!(instructions.len(), 1);
+        let inst = &instructions[0];
+        let regs: Vec<_> = inst.registers.iter().copied().collect();
+        assert_eq!(regs, vec![3, 4]);
+        assert_eq!(
+            inst.reference,
+            Some(Reference::Method(MethodIdx::new(0x1234)))
+        );
+        assert_eq!(
+            inst.secondary_reference,
+            Some(Reference::Proto(ProtoIdx::new(0x5678)))
+        );
+    }
+
+    #[test]
+    fn decode_format4rcc_dual_reference() {
+        static BYTES: [u8; 8] = [0xfb, 0x03, 0x00, 0x01, 0x20, 0x00, 0x00, 0x02];
+        let code = code_item_from_bytes(&BYTES);
+        let instructions = super::decode_stream(&code).expect("decode");
+        assert_eq!(instructions.len(), 1);
+        let inst = &instructions[0];
+        assert_eq!(
+            inst.range,
+            Some(RangeInfo {
+                start: 0x20,
+                count: 3
+            })
+        );
+        assert_eq!(
+            inst.reference,
+            Some(Reference::Method(MethodIdx::new(0x0100)))
+        );
+        assert_eq!(
+            inst.secondary_reference,
+            Some(Reference::Proto(ProtoIdx::new(0x0200)))
+        );
+    }
+
+    #[test]
+    fn packed_switch_payload_decodes() {
+        static BYTES: [u8; 18] = [
+            0x2b, 0x00, 0x03, 0x00, 0x00, 0x00, // packed-switch with offset 3 units
+            0x00, 0x01, // ident
+            0x01, 0x00, // size
+            0x11, 0x00, 0x00, 0x00, // first key
+            0x02, 0x00, 0x00, 0x00, // target offset
+        ];
+        let code = code_item_from_bytes(&BYTES);
+        let instructions = super::decode_stream(&code).expect("decode");
+        assert!(matches!(
+            instructions[0].switch.as_ref(),
+            Some(SwitchPayload::Packed { first_key, targets })
+            if *first_key == 0x11 && targets == &vec![2]
+        ));
+    }
+
+    #[test]
+    fn packed_switch_payload_rejects_mismatched_ident() {
+        static BYTES: [u8; 18] = [
+            0x2b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x02, // invalid ident
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let code = code_item_from_bytes(&BYTES);
+        let err = super::decode_stream(&code).expect_err("should fail");
+        assert!(matches!(err, DexError::Malformed { .. }));
+    }
+
+    #[test]
+    fn packed_switch_multiple_entries() {
+        static BYTES: [u8; 22] = [
+            0x2b, 0x00, 0x03, 0x00, 0x00, 0x00, //
+            0x00, 0x01, // ident
+            0x02, 0x00, // size = 2
+            0x01, 0x00, 0x00, 0x00, // first key
+            0x10, 0x00, 0x00, 0x00, // target0
+            0x20, 0x00, 0x00, 0x00, // target1
+        ];
+        let code = code_item_from_bytes(&BYTES);
+        let instructions = super::decode_stream(&code).expect("decode");
+        if let Some(SwitchPayload::Packed { first_key, targets }) = &instructions[0].switch {
+            assert_eq!(*first_key, 1);
+            assert_eq!(targets, &vec![0x10, 0x20]);
+        } else {
+            panic!("expected packed switch payload");
+        }
+    }
+
+    #[test]
+    fn const_method_handle_and_type() {
+        static BYTES: [u8; 10] = [
+            0xfe, 0x01, 0x02, 0x00, // const-method-handle v1, #2
+            0xff, 0x02, 0x03, 0x00, // const-method-type v2, #3
+            0x0e, 0x00, // return-void
+        ];
+        let code = code_item_from_bytes(&BYTES);
+        let instructions = super::decode_stream(&code).expect("decode");
+        assert!(matches!(
+            instructions[0].reference,
+            Some(Reference::MethodHandle(idx)) if idx.raw() == 0x0002
+        ));
+        assert!(matches!(
+            instructions[1].reference,
+            Some(Reference::Proto(idx)) if idx.raw() == 0x0003
+        ));
+    }
+
+    #[test]
+    fn invoke_custom_references_call_site() {
+        static BYTES: [u8; 8] = [0xfc, 0x10, 0x01, 0x00, 0x32, 0x10, 0x00, 0x00];
+        let code = code_item_from_bytes(&BYTES);
+        let instructions = super::decode_stream(&code).expect("decode");
+        assert_eq!(instructions[0].registers.len(), 1);
+        assert!(matches!(
+            instructions[0].reference,
+            Some(Reference::CallSite(idx)) if idx.raw() == 0x0001
+        ));
+    }
+
+    #[test]
+    fn invoke_custom_range_references_call_site() {
+        static BYTES: [u8; 8] = [0xfd, 0x02, 0x02, 0x00, 0x20, 0x00, 0x00, 0x00];
+        let code = code_item_from_bytes(&BYTES);
+        let instructions = super::decode_stream(&code).expect("decode");
+        assert!(matches!(
+            instructions[0].reference,
+            Some(Reference::CallSite(idx)) if idx.raw() == 0x0002
+        ));
+        assert!(matches!(
+            instructions[0].range,
+            Some(RangeInfo { start, count }) if start == 0x20 && count == 2
+        ));
+    }
 }
 
 fn decode_reference(kind: ReferenceType, index: u32) -> Option<Reference> {
@@ -641,6 +930,7 @@ struct OpcodeInfo {
     name: &'static str,
     format: InstructionFormat,
     reference: ReferenceType,
+    reference2: ReferenceType,
 }
 
 impl OpcodeInfo {
@@ -650,6 +940,7 @@ impl OpcodeInfo {
             name: "UNDEFINED",
             format: InstructionFormat::Unresolved,
             reference: ReferenceType::None,
+            reference2: ReferenceType::None,
         }
     }
 }
@@ -657,375 +948,437 @@ impl OpcodeInfo {
 const OPCODE_TABLE: [OpcodeInfo; 256] = [
     OpcodeInfo {
         opcode: 0x00,
-        name: "NOP",
+        name: "nop",
         format: InstructionFormat::Format10x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x01,
-        name: "MOVE",
+        name: "move",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x02,
-        name: "MOVE_FROM16",
+        name: "move/from16",
         format: InstructionFormat::Format22x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x03,
-        name: "MOVE_16",
+        name: "move/16",
         format: InstructionFormat::Format32x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x04,
-        name: "MOVE_WIDE",
+        name: "move-wide",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x05,
-        name: "MOVE_WIDE_FROM16",
+        name: "move-wide/from16",
         format: InstructionFormat::Format22x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x06,
-        name: "MOVE_WIDE_16",
+        name: "move-wide/16",
         format: InstructionFormat::Format32x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x07,
-        name: "MOVE_OBJECT",
+        name: "move-object",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x08,
-        name: "MOVE_OBJECT_FROM16",
+        name: "move-object/from16",
         format: InstructionFormat::Format22x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x09,
-        name: "MOVE_OBJECT_16",
+        name: "move-object/16",
         format: InstructionFormat::Format32x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x0a,
-        name: "MOVE_RESULT",
+        name: "move-result",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x0b,
-        name: "MOVE_RESULT_WIDE",
+        name: "move-result-wide",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x0c,
-        name: "MOVE_RESULT_OBJECT",
+        name: "move-result-object",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x0d,
-        name: "MOVE_EXCEPTION",
+        name: "move-exception",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x0e,
-        name: "RETURN_VOID",
+        name: "return-void",
         format: InstructionFormat::Format10x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x0f,
-        name: "RETURN",
+        name: "return",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x10,
-        name: "RETURN_WIDE",
+        name: "return-wide",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x11,
-        name: "RETURN_OBJECT",
+        name: "return-object",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x12,
-        name: "CONST_4",
+        name: "const/4",
         format: InstructionFormat::Format11n,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x13,
-        name: "CONST_16",
+        name: "const/16",
         format: InstructionFormat::Format21s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x14,
-        name: "CONST",
+        name: "const",
         format: InstructionFormat::Format31i,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x15,
-        name: "CONST_HIGH16",
+        name: "const/high16",
         format: InstructionFormat::Format21ih,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x16,
-        name: "CONST_WIDE_16",
+        name: "const-wide/16",
         format: InstructionFormat::Format21s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x17,
-        name: "CONST_WIDE_32",
+        name: "const-wide/32",
         format: InstructionFormat::Format31i,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x18,
-        name: "CONST_WIDE",
+        name: "const-wide",
         format: InstructionFormat::Format51l,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x19,
-        name: "CONST_WIDE_HIGH16",
+        name: "const-wide/high16",
         format: InstructionFormat::Format21lh,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x1a,
-        name: "CONST_STRING",
+        name: "const-string",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::String,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x1b,
-        name: "CONST_STRING_JUMBO",
+        name: "const-string/jumbo",
         format: InstructionFormat::Format31c,
         reference: ReferenceType::String,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x1c,
-        name: "CONST_CLASS",
+        name: "const-class",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Type,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x1d,
-        name: "MONITOR_ENTER",
+        name: "monitor-enter",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x1e,
-        name: "MONITOR_EXIT",
+        name: "monitor-exit",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x1f,
-        name: "CHECK_CAST",
+        name: "check-cast",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Type,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x20,
-        name: "INSTANCE_OF",
+        name: "instance-of",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Type,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x21,
-        name: "ARRAY_LENGTH",
+        name: "array-length",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x22,
-        name: "NEW_INSTANCE",
+        name: "new-instance",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Type,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x23,
-        name: "NEW_ARRAY",
+        name: "new-array",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Type,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x24,
-        name: "FILLED_NEW_ARRAY",
+        name: "filled-new-array",
         format: InstructionFormat::Format35c,
         reference: ReferenceType::Type,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x25,
-        name: "FILLED_NEW_ARRAY_RANGE",
+        name: "filled-new-array/range",
         format: InstructionFormat::Format3rc,
         reference: ReferenceType::Type,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x26,
-        name: "FILL_ARRAY_DATA",
+        name: "fill-array-data",
         format: InstructionFormat::Format31t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x27,
-        name: "THROW",
+        name: "throw",
         format: InstructionFormat::Format11x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x28,
-        name: "GOTO",
+        name: "goto",
         format: InstructionFormat::Format10t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x29,
-        name: "GOTO_16",
+        name: "goto/16",
         format: InstructionFormat::Format20t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x2a,
-        name: "GOTO_32",
+        name: "goto/32",
         format: InstructionFormat::Format30t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x2b,
-        name: "PACKED_SWITCH",
+        name: "packed-switch",
         format: InstructionFormat::Format31t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x2c,
-        name: "SPARSE_SWITCH",
+        name: "sparse-switch",
         format: InstructionFormat::Format31t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x2d,
-        name: "CMPL_FLOAT",
+        name: "cmpl-float",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x2e,
-        name: "CMPG_FLOAT",
+        name: "cmpg-float",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x2f,
-        name: "CMPL_DOUBLE",
+        name: "cmpl-double",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x30,
-        name: "CMPG_DOUBLE",
+        name: "cmpg-double",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x31,
-        name: "CMP_LONG",
+        name: "cmp-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x32,
-        name: "IF_EQ",
+        name: "if-eq",
         format: InstructionFormat::Format22t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x33,
-        name: "IF_NE",
+        name: "if-ne",
         format: InstructionFormat::Format22t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x34,
-        name: "IF_LT",
+        name: "if-lt",
         format: InstructionFormat::Format22t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x35,
-        name: "IF_GE",
+        name: "if-ge",
         format: InstructionFormat::Format22t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x36,
-        name: "IF_GT",
+        name: "if-gt",
         format: InstructionFormat::Format22t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x37,
-        name: "IF_LE",
+        name: "if-le",
         format: InstructionFormat::Format22t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x38,
-        name: "IF_EQZ",
+        name: "if-eqz",
         format: InstructionFormat::Format21t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x39,
-        name: "IF_NEZ",
+        name: "if-nez",
         format: InstructionFormat::Format21t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x3a,
-        name: "IF_LTZ",
+        name: "if-ltz",
         format: InstructionFormat::Format21t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x3b,
-        name: "IF_GEZ",
+        name: "if-gez",
         format: InstructionFormat::Format21t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x3c,
-        name: "IF_GTZ",
+        name: "if-gtz",
         format: InstructionFormat::Format21t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x3d,
-        name: "IF_LEZ",
+        name: "if-lez",
         format: InstructionFormat::Format21t,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo::default(),
     OpcodeInfo::default(),
@@ -1035,972 +1388,1308 @@ const OPCODE_TABLE: [OpcodeInfo; 256] = [
     OpcodeInfo::default(),
     OpcodeInfo {
         opcode: 0x44,
-        name: "AGET",
+        name: "aget",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x45,
-        name: "AGET_WIDE",
+        name: "aget-wide",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x46,
-        name: "AGET_OBJECT",
+        name: "aget-object",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x47,
-        name: "AGET_BOOLEAN",
+        name: "aget-boolean",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x48,
-        name: "AGET_BYTE",
+        name: "aget-byte",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x49,
-        name: "AGET_CHAR",
+        name: "aget-char",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x4a,
-        name: "AGET_SHORT",
+        name: "aget-short",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x4b,
-        name: "APUT",
+        name: "aput",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x4c,
-        name: "APUT_WIDE",
+        name: "aput-wide",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x4d,
-        name: "APUT_OBJECT",
+        name: "aput-object",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x4e,
-        name: "APUT_BOOLEAN",
+        name: "aput-boolean",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x4f,
-        name: "APUT_BYTE",
+        name: "aput-byte",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x50,
-        name: "APUT_CHAR",
+        name: "aput-char",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x51,
-        name: "APUT_SHORT",
+        name: "aput-short",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x52,
-        name: "IGET",
+        name: "iget",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x53,
-        name: "IGET_WIDE",
+        name: "iget-wide",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x54,
-        name: "IGET_OBJECT",
+        name: "iget-object",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x55,
-        name: "IGET_BOOLEAN",
+        name: "iget-boolean",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x56,
-        name: "IGET_BYTE",
+        name: "iget-byte",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x57,
-        name: "IGET_CHAR",
+        name: "iget-char",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x58,
-        name: "IGET_SHORT",
+        name: "iget-short",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x59,
-        name: "IPUT",
+        name: "iput",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x5a,
-        name: "IPUT_WIDE",
+        name: "iput-wide",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x5b,
-        name: "IPUT_OBJECT",
+        name: "iput-object",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x5c,
-        name: "IPUT_BOOLEAN",
+        name: "iput-boolean",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x5d,
-        name: "IPUT_BYTE",
+        name: "iput-byte",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x5e,
-        name: "IPUT_CHAR",
+        name: "iput-char",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x5f,
-        name: "IPUT_SHORT",
+        name: "iput-short",
         format: InstructionFormat::Format22c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x60,
-        name: "SGET",
+        name: "sget",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x61,
-        name: "SGET_WIDE",
+        name: "sget-wide",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x62,
-        name: "SGET_OBJECT",
+        name: "sget-object",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x63,
-        name: "SGET_BOOLEAN",
+        name: "sget-boolean",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x64,
-        name: "SGET_BYTE",
+        name: "sget-byte",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x65,
-        name: "SGET_CHAR",
+        name: "sget-char",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x66,
-        name: "SGET_SHORT",
+        name: "sget-short",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x67,
-        name: "SPUT",
+        name: "sput",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x68,
-        name: "SPUT_WIDE",
+        name: "sput-wide",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x69,
-        name: "SPUT_OBJECT",
+        name: "sput-object",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x6a,
-        name: "SPUT_BOOLEAN",
+        name: "sput-boolean",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x6b,
-        name: "SPUT_BYTE",
+        name: "sput-byte",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x6c,
-        name: "SPUT_CHAR",
+        name: "sput-char",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x6d,
-        name: "SPUT_SHORT",
+        name: "sput-short",
         format: InstructionFormat::Format21c,
         reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x6e,
-        name: "INVOKE_VIRTUAL",
+        name: "invoke-virtual",
         format: InstructionFormat::Format35c,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x6f,
-        name: "INVOKE_SUPER",
+        name: "invoke-super",
         format: InstructionFormat::Format35c,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x70,
-        name: "INVOKE_DIRECT",
+        name: "invoke-direct",
         format: InstructionFormat::Format35c,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x71,
-        name: "INVOKE_STATIC",
+        name: "invoke-static",
         format: InstructionFormat::Format35c,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x72,
-        name: "INVOKE_INTERFACE",
+        name: "invoke-interface",
         format: InstructionFormat::Format35c,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
-    OpcodeInfo::default(),
+    OpcodeInfo {
+        opcode: 0x73,
+        name: "return-void-no-barrier",
+        format: InstructionFormat::Format10x,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
     OpcodeInfo {
         opcode: 0x74,
-        name: "INVOKE_VIRTUAL_RANGE",
+        name: "invoke-virtual/range",
         format: InstructionFormat::Format3rc,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x75,
-        name: "INVOKE_SUPER_RANGE",
+        name: "invoke-super/range",
         format: InstructionFormat::Format3rc,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x76,
-        name: "INVOKE_DIRECT_RANGE",
+        name: "invoke-direct/range",
         format: InstructionFormat::Format3rc,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x77,
-        name: "INVOKE_STATIC_RANGE",
+        name: "invoke-static/range",
         format: InstructionFormat::Format3rc,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x78,
-        name: "INVOKE_INTERFACE_RANGE",
+        name: "invoke-interface/range",
         format: InstructionFormat::Format3rc,
         reference: ReferenceType::Method,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo::default(),
     OpcodeInfo::default(),
     OpcodeInfo {
         opcode: 0x7b,
-        name: "NEG_INT",
+        name: "neg-int",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x7c,
-        name: "NOT_INT",
+        name: "not-int",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x7d,
-        name: "NEG_LONG",
+        name: "neg-long",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x7e,
-        name: "NOT_LONG",
+        name: "not-long",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x7f,
-        name: "NEG_FLOAT",
+        name: "neg-float",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x80,
-        name: "NEG_DOUBLE",
+        name: "neg-double",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x81,
-        name: "INT_TO_LONG",
+        name: "int-to-long",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x82,
-        name: "INT_TO_FLOAT",
+        name: "int-to-float",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x83,
-        name: "INT_TO_DOUBLE",
+        name: "int-to-double",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x84,
-        name: "LONG_TO_INT",
+        name: "long-to-int",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x85,
-        name: "LONG_TO_FLOAT",
+        name: "long-to-float",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x86,
-        name: "LONG_TO_DOUBLE",
+        name: "long-to-double",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x87,
-        name: "FLOAT_TO_INT",
+        name: "float-to-int",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x88,
-        name: "FLOAT_TO_LONG",
+        name: "float-to-long",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x89,
-        name: "FLOAT_TO_DOUBLE",
+        name: "float-to-double",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x8a,
-        name: "DOUBLE_TO_INT",
+        name: "double-to-int",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x8b,
-        name: "DOUBLE_TO_LONG",
+        name: "double-to-long",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x8c,
-        name: "DOUBLE_TO_FLOAT",
+        name: "double-to-float",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x8d,
-        name: "INT_TO_BYTE",
+        name: "int-to-byte",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x8e,
-        name: "INT_TO_CHAR",
+        name: "int-to-char",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x8f,
-        name: "INT_TO_SHORT",
+        name: "int-to-short",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x90,
-        name: "ADD_INT",
+        name: "add-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x91,
-        name: "SUB_INT",
+        name: "sub-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x92,
-        name: "MUL_INT",
+        name: "mul-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x93,
-        name: "DIV_INT",
+        name: "div-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x94,
-        name: "REM_INT",
+        name: "rem-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x95,
-        name: "AND_INT",
+        name: "and-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x96,
-        name: "OR_INT",
+        name: "or-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x97,
-        name: "XOR_INT",
+        name: "xor-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x98,
-        name: "SHL_INT",
+        name: "shl-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x99,
-        name: "SHR_INT",
+        name: "shr-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x9a,
-        name: "USHR_INT",
+        name: "ushr-int",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x9b,
-        name: "ADD_LONG",
+        name: "add-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x9c,
-        name: "SUB_LONG",
+        name: "sub-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x9d,
-        name: "MUL_LONG",
+        name: "mul-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x9e,
-        name: "DIV_LONG",
+        name: "div-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0x9f,
-        name: "REM_LONG",
+        name: "rem-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa0,
-        name: "AND_LONG",
+        name: "and-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa1,
-        name: "OR_LONG",
+        name: "or-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa2,
-        name: "XOR_LONG",
+        name: "xor-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa3,
-        name: "SHL_LONG",
+        name: "shl-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa4,
-        name: "SHR_LONG",
+        name: "shr-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa5,
-        name: "USHR_LONG",
+        name: "ushr-long",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa6,
-        name: "ADD_FLOAT",
+        name: "add-float",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa7,
-        name: "SUB_FLOAT",
+        name: "sub-float",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa8,
-        name: "MUL_FLOAT",
+        name: "mul-float",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xa9,
-        name: "DIV_FLOAT",
+        name: "div-float",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xaa,
-        name: "REM_FLOAT",
+        name: "rem-float",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xab,
-        name: "ADD_DOUBLE",
+        name: "add-double",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xac,
-        name: "SUB_DOUBLE",
+        name: "sub-double",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xad,
-        name: "MUL_DOUBLE",
+        name: "mul-double",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xae,
-        name: "DIV_DOUBLE",
+        name: "div-double",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xaf,
-        name: "REM_DOUBLE",
+        name: "rem-double",
         format: InstructionFormat::Format23x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb0,
-        name: "ADD_INT_2ADDR",
+        name: "add-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb1,
-        name: "SUB_INT_2ADDR",
+        name: "sub-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb2,
-        name: "MUL_INT_2ADDR",
+        name: "mul-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb3,
-        name: "DIV_INT_2ADDR",
+        name: "div-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb4,
-        name: "REM_INT_2ADDR",
+        name: "rem-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb5,
-        name: "AND_INT_2ADDR",
+        name: "and-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb6,
-        name: "OR_INT_2ADDR",
+        name: "or-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb7,
-        name: "XOR_INT_2ADDR",
+        name: "xor-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb8,
-        name: "SHL_INT_2ADDR",
+        name: "shl-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xb9,
-        name: "SHR_INT_2ADDR",
+        name: "shr-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xba,
-        name: "USHR_INT_2ADDR",
+        name: "ushr-int/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xbb,
-        name: "ADD_LONG_2ADDR",
+        name: "add-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xbc,
-        name: "SUB_LONG_2ADDR",
+        name: "sub-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xbd,
-        name: "MUL_LONG_2ADDR",
+        name: "mul-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xbe,
-        name: "DIV_LONG_2ADDR",
+        name: "div-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xbf,
-        name: "REM_LONG_2ADDR",
+        name: "rem-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc0,
-        name: "AND_LONG_2ADDR",
+        name: "and-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc1,
-        name: "OR_LONG_2ADDR",
+        name: "or-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc2,
-        name: "XOR_LONG_2ADDR",
+        name: "xor-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc3,
-        name: "SHL_LONG_2ADDR",
+        name: "shl-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc4,
-        name: "SHR_LONG_2ADDR",
+        name: "shr-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc5,
-        name: "USHR_LONG_2ADDR",
+        name: "ushr-long/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc6,
-        name: "ADD_FLOAT_2ADDR",
+        name: "add-float/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc7,
-        name: "SUB_FLOAT_2ADDR",
+        name: "sub-float/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc8,
-        name: "MUL_FLOAT_2ADDR",
+        name: "mul-float/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xc9,
-        name: "DIV_FLOAT_2ADDR",
+        name: "div-float/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xca,
-        name: "REM_FLOAT_2ADDR",
+        name: "rem-float/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xcb,
-        name: "ADD_DOUBLE_2ADDR",
+        name: "add-double/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xcc,
-        name: "SUB_DOUBLE_2ADDR",
+        name: "sub-double/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xcd,
-        name: "MUL_DOUBLE_2ADDR",
+        name: "mul-double/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xce,
-        name: "DIV_DOUBLE_2ADDR",
+        name: "div-double/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xcf,
-        name: "REM_DOUBLE_2ADDR",
+        name: "rem-double/2addr",
         format: InstructionFormat::Format12x,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd0,
-        name: "ADD_INT_LIT16",
+        name: "add-int/lit16",
         format: InstructionFormat::Format22s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd1,
-        name: "RSUB_INT",
+        name: "rsub-int",
         format: InstructionFormat::Format22s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd2,
-        name: "MUL_INT_LIT16",
+        name: "mul-int/lit16",
         format: InstructionFormat::Format22s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd3,
-        name: "DIV_INT_LIT16",
+        name: "div-int/lit16",
         format: InstructionFormat::Format22s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd4,
-        name: "REM_INT_LIT16",
+        name: "rem-int/lit16",
         format: InstructionFormat::Format22s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd5,
-        name: "AND_INT_LIT16",
+        name: "and-int/lit16",
         format: InstructionFormat::Format22s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd6,
-        name: "OR_INT_LIT16",
+        name: "or-int/lit16",
         format: InstructionFormat::Format22s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd7,
-        name: "XOR_INT_LIT16",
+        name: "xor-int/lit16",
         format: InstructionFormat::Format22s,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd8,
-        name: "ADD_INT_LIT8",
+        name: "add-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xd9,
-        name: "RSUB_INT_LIT8",
+        name: "rsub-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xda,
-        name: "MUL_INT_LIT8",
+        name: "mul-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xdb,
-        name: "DIV_INT_LIT8",
+        name: "div-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xdc,
-        name: "REM_INT_LIT8",
+        name: "rem-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xdd,
-        name: "AND_INT_LIT8",
+        name: "and-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xde,
-        name: "OR_INT_LIT8",
+        name: "or-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xdf,
-        name: "XOR_INT_LIT8",
+        name: "xor-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xe0,
-        name: "SHL_INT_LIT8",
+        name: "shl-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xe1,
-        name: "SHR_INT_LIT8",
+        name: "shr-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
     OpcodeInfo {
         opcode: 0xe2,
-        name: "USHR_INT_LIT8",
+        name: "ushr-int/lit8",
         format: InstructionFormat::Format22b,
         reference: ReferenceType::None,
+        reference2: ReferenceType::None,
     },
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
-    OpcodeInfo::default(),
+    OpcodeInfo {
+        opcode: 0xe3,
+        name: "iget-volatile",
+        format: InstructionFormat::Format22c,
+        reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xe4,
+        name: "iput-volatile",
+        format: InstructionFormat::Format22c,
+        reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xe5,
+        name: "sget-volatile",
+        format: InstructionFormat::Format21c,
+        reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xe6,
+        name: "sput-volatile",
+        format: InstructionFormat::Format21c,
+        reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xe7,
+        name: "iget-object-volatile",
+        format: InstructionFormat::Format22c,
+        reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xe8,
+        name: "iget-wide-volatile",
+        format: InstructionFormat::Format22c,
+        reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xe9,
+        name: "iput-wide-volatile",
+        format: InstructionFormat::Format22c,
+        reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xea,
+        name: "sget-wide-volatile",
+        format: InstructionFormat::Format21c,
+        reference: ReferenceType::Field,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xeb,
+        name: "iput-boolean-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xec,
+        name: "iput-byte-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xed,
+        name: "iput-char-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xee,
+        name: "iput-short-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xef,
+        name: "iget-boolean-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf0,
+        name: "iget-byte-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf1,
+        name: "iget-char-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf2,
+        name: "iget-short-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf3,
+        name: "iget-wide-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf4,
+        name: "iget-object-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf5,
+        name: "iput-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf6,
+        name: "iput-wide-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf7,
+        name: "iput-object-quick",
+        format: InstructionFormat::Format22cs,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf8,
+        name: "invoke-virtual-quick",
+        format: InstructionFormat::Format35ms,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xf9,
+        name: "invoke-virtual-quick/range",
+        format: InstructionFormat::Format3rms,
+        reference: ReferenceType::None,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xfa,
+        name: "invoke-polymorphic",
+        format: InstructionFormat::Format45cc,
+        reference: ReferenceType::Method,
+        reference2: ReferenceType::Proto,
+    },
+    OpcodeInfo {
+        opcode: 0xfb,
+        name: "invoke-polymorphic/range",
+        format: InstructionFormat::Format4rcc,
+        reference: ReferenceType::Method,
+        reference2: ReferenceType::Proto,
+    },
+    OpcodeInfo {
+        opcode: 0xfc,
+        name: "invoke-custom",
+        format: InstructionFormat::Format35c,
+        reference: ReferenceType::CallSite,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xfd,
+        name: "invoke-custom/range",
+        format: InstructionFormat::Format3rc,
+        reference: ReferenceType::CallSite,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xfe,
+        name: "const-method-handle",
+        format: InstructionFormat::Format21c,
+        reference: ReferenceType::MethodHandle,
+        reference2: ReferenceType::None,
+    },
+    OpcodeInfo {
+        opcode: 0xff,
+        name: "const-method-type",
+        format: InstructionFormat::Format21c,
+        reference: ReferenceType::Proto,
+        reference2: ReferenceType::None,
+    },
 ];
 
 fn read_u8(bytes: &[u8], offset: usize) -> DexResult<u8> {

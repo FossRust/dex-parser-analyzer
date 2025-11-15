@@ -34,6 +34,7 @@ pub struct DtoInstruction {
     pub literal: Option<i64>,
     pub offset: Option<i32>,
     pub reference: Option<DtoReference>,
+    pub secondary_reference: Option<DtoReference>,
 }
 
 /// Simple CFG DTO with a list of nodes and adjacency.
@@ -102,6 +103,13 @@ pub fn instructions_to_dto(instructions: &[Instruction]) -> Vec<DtoInstruction> 
                 kind: reference.kind_label().to_string(),
                 index: reference.index(),
             });
+            let secondary_reference =
+                ins.secondary_reference
+                    .as_ref()
+                    .map(|reference| DtoReference {
+                        kind: reference.kind_label().to_string(),
+                        index: reference.index(),
+                    });
             DtoInstruction {
                 pc: ins.pc,
                 opcode: ins.opcode,
@@ -111,6 +119,7 @@ pub fn instructions_to_dto(instructions: &[Instruction]) -> Vec<DtoInstruction> 
                 literal: ins.literal,
                 offset: ins.offset,
                 reference,
+                secondary_reference,
             }
         })
         .collect()
