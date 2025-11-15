@@ -208,6 +208,11 @@ impl<'a> DexFile<'a> {
         self.method_ids.len()
     }
 
+    /// Returns the number of declared types.
+    pub fn type_count(&self) -> usize {
+        self.type_ids.len()
+    }
+
     /// Returns the [`ProtoId`] for the provided index.
     pub fn proto_id(&self, idx: ProtoIdx) -> Option<&ProtoId> {
         self.proto_ids.get(idx.to_usize())
