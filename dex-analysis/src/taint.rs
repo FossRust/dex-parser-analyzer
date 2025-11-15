@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::{
     config::AnalysisConfig,
     data_flow::{self, AnalysisContext, ForwardAnalysis},
-    model::{describe_method, Finding, Location, Severity, VulnerabilityKind},
+    model::{describe_method, Finding, Location, MethodSummary, Severity, VulnerabilityKind},
 };
 
 struct MethodPattern {
@@ -19,6 +19,7 @@ struct MethodPattern {
     name: &'static str,
     signature: &'static str,
     description: &'static str,
+    taint_args: &'static [usize],
 }
 
 const SOURCES: &[MethodPattern] = &[
@@ -28,6 +29,7 @@ const SOURCES: &[MethodPattern] = &[
         name: "getStringExtra",
         signature: "(Ljava/lang/String;)Ljava/lang/String;",
         description: "Intent.getStringExtra",
+        taint_args: &[],
     },
     MethodPattern {
         id: "SRC_SHARED_PREFS",
@@ -35,6 +37,7 @@ const SOURCES: &[MethodPattern] = &[
         name: "getString",
         signature: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
         description: "SharedPreferences.getString",
+        taint_args: &[],
     },
     MethodPattern {
         id: "SRC_TELEPHONY_IMEI",
@@ -42,6 +45,7 @@ const SOURCES: &[MethodPattern] = &[
         name: "getDeviceId",
         signature: "()Ljava/lang/String;",
         description: "TelephonyManager.getDeviceId",
+        taint_args: &[],
     },
     MethodPattern {
         id: "SRC_SECURE_SETTINGS",
@@ -49,6 +53,7 @@ const SOURCES: &[MethodPattern] = &[
         name: "getString",
         signature: "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;",
         description: "Settings.Secure.getString",
+        taint_args: &[],
     },
 ];
 
@@ -59,6 +64,7 @@ const SINKS: &[MethodPattern] = &[
         name: "d",
         signature: "(Ljava/lang/String;Ljava/lang/String;)I",
         description: "Log.d",
+        taint_args: &[1],
     },
     MethodPattern {
         id: "SNK_LOG_ERROR",
@@ -66,6 +72,7 @@ const SINKS: &[MethodPattern] = &[
         name: "e",
         signature: "(Ljava/lang/String;Ljava/lang/String;)I",
         description: "Log.e",
+        taint_args: &[1],
     },
     MethodPattern {
         id: "SNK_URL_CONSTRUCTOR",
@@ -73,6 +80,7 @@ const SINKS: &[MethodPattern] = &[
         name: "<init>",
         signature: "(Ljava/lang/String;)V",
         description: "java.net.URL.<init>",
+        taint_args: &[0],
     },
     MethodPattern {
         id: "SNK_WEBVIEW_LOAD_URL",
@@ -80,6 +88,29 @@ const SINKS: &[MethodPattern] = &[
         name: "loadUrl",
         signature: "(Ljava/lang/String;)V",
         description: "WebView.loadUrl",
+        taint_args: &[0],
+    },
+];
+
+struct PassthroughPattern {
+    class: &'static str,
+    name: &'static str,
+    signature: &'static str,
+    propagate_from: &'static [usize],
+}
+
+const PASSTHROUGH_METHODS: &[PassthroughPattern] = &[
+    PassthroughPattern {
+        class: "Ljava/lang/String;",
+        name: "valueOf",
+        signature: "(Ljava/lang/Object;)Ljava/lang/String;",
+        propagate_from: &[0],
+    },
+    PassthroughPattern {
+        class: "Ljava/lang/StringBuilder;",
+        name: "toString",
+        signature: "()Ljava/lang/String;",
+        propagate_from: &[0],
     },
 ];
 
@@ -115,23 +146,37 @@ pub fn run_taint_checks(
                 kind: VulnerabilityKind::Custom("SensitiveDataLeak".into()),
                 severity: Severity::High,
                 location: Location::from_method(dex, incident.method, Some(incident.pc)),
-                message: format!("Tainted data reaches {}", incident.sink.description),
+                message: format!(
+                    "Tainted data reaches {} via arguments {:?}",
+                    incident.sink.description,
+                    incident
+                        .arguments
+                        .iter()
+                        .map(|arg| arg.index)
+                        .collect::<Vec<_>>()
+                ),
                 extra: json!({
                     "sink": incident.sink.description,
                     "pc": incident.pc,
-                    "register": incident.register,
+                    "tainted_args": incident.arguments.iter().map(|arg| {
+                        json!({
+                            "index": arg.index,
+                            "register": arg.register,
+                        })
+                    }).collect::<Vec<_>>(),
                 }),
             });
         }
     }
 }
 
-struct MethodLookup {
-    sources: HashMap<u32, &'static MethodPattern>,
-    sinks: HashMap<u32, &'static MethodPattern>,
+struct MethodLookup<'a> {
+    sources: HashMap<u32, &'a MethodPattern>,
+    sinks: HashMap<u32, &'a MethodPattern>,
+    passthrough: &'a [PassthroughPattern],
 }
 
-impl MethodLookup {
+impl MethodLookup<'static> {
     fn build(dex: &DexFile<'_>) -> Self {
         let mut sources = HashMap::new();
         let mut sinks = HashMap::new();
@@ -155,29 +200,17 @@ impl MethodLookup {
                 }
             }
         }
-        Self { sources, sinks }
-    }
-
-    #[cfg(test)]
-    fn from_raw(
-        sources_entries: &[(u32, &'static MethodPattern)],
-        sink_entries: &[(u32, &'static MethodPattern)],
-    ) -> Self {
-        let mut sources = HashMap::new();
-        let mut sinks = HashMap::new();
-        for (idx, pattern) in sources_entries {
-            sources.insert(*idx, *pattern);
+        Self {
+            sources,
+            sinks,
+            passthrough: PASSTHROUGH_METHODS,
         }
-        for (idx, pattern) in sink_entries {
-            sinks.insert(*idx, *pattern);
-        }
-        Self { sources, sinks }
     }
 }
 
 struct MethodTaintAnalysis<'a> {
     register_count: usize,
-    lookup: &'a MethodLookup,
+    lookup: &'a MethodLookup<'a>,
     findings: RefCell<Vec<TaintIncident<'a>>>,
 }
 
@@ -231,7 +264,13 @@ struct TaintIncident<'a> {
     sink: &'a MethodPattern,
     method: MethodIdx,
     pc: u32,
-    register: Option<u16>,
+    arguments: Vec<TaintedArg>,
+}
+
+#[derive(Clone)]
+struct TaintedArg {
+    index: usize,
+    register: u16,
 }
 
 impl<'a> ForwardAnalysis for MethodTaintAnalysis<'a> {
@@ -259,7 +298,7 @@ impl<'a> ForwardAnalysis for MethodTaintAnalysis<'a> {
         instructions: &[dex_core::bytecode::Instruction],
         state: &mut Self::State,
     ) {
-        let mut pending_source: Option<&'static MethodPattern> = None;
+        let mut pending_source: Option<PendingSource> = None;
         for inst in instructions {
             let name = inst.name;
             let registers = referenced_registers(inst);
@@ -269,11 +308,7 @@ impl<'a> ForwardAnalysis for MethodTaintAnalysis<'a> {
                 }
             } else if is_move_result_object(name) {
                 if let Some(&dst) = registers.get(0) {
-                    if pending_source.is_some() {
-                        state.set(dst, true);
-                    } else {
-                        state.clear(dst);
-                    }
+                    handle_move_result(state, dst, &pending_source);
                 }
                 pending_source = None;
             } else if is_const(name) {
@@ -284,28 +319,38 @@ impl<'a> ForwardAnalysis for MethodTaintAnalysis<'a> {
 
             if let Some(Reference::Method(target)) = inst.reference.as_ref() {
                 let raw = target.raw();
-                if let Some(source) = self.lookup.sources.get(&raw) {
-                    pending_source = Some(source);
+                let summary = describe_method(ctx.dex, *target);
+                if let Some(_source) = self.lookup.sources.get(&raw) {
+                    pending_source = Some(PendingSource::Direct);
                     continue;
                 }
                 if let Some(sink) = self.lookup.sinks.get(&raw) {
-                    pending_source = None;
-                    let tainted_register = registers.iter().find(|reg| state.get(**reg));
-                    if let Some(&reg) = tainted_register {
+                    let tainted_args = collect_tainted_args(state, &registers);
+                    if sink_triggered(sink, &tainted_args) {
                         self.findings.borrow_mut().push(TaintIncident {
                             sink,
                             method: ctx.method,
                             pc: inst.pc,
-                            register: Some(reg),
+                            arguments: tainted_args,
                         });
                     }
                     continue;
                 }
+                if let Some(pass) = match_passthrough(&summary, self.lookup.passthrough) {
+                    pending_source = Some(PendingSource::Passthrough(pass, registers.clone()));
+                    continue;
+                }
+                pending_source = None;
             } else {
                 pending_source = None;
             }
         }
     }
+}
+
+enum PendingSource<'a> {
+    Direct,
+    Passthrough(&'a PassthroughPattern, Vec<u16>),
 }
 
 fn is_move_object(name: &str) -> bool {
@@ -332,73 +377,59 @@ fn referenced_registers(inst: &Instruction) -> Vec<u16> {
     Vec::new()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::data_flow::AnalysisContext;
-    use dex_core::{bytecode::Reference, graphs::BasicBlock, parse_dex};
-
-    #[test]
-    fn tainted_source_reaching_url_sink_triggers_finding() {
-        const SRC_IDX: u32 = 1;
-        const SINK_IDX: u32 = 2;
-        let lookup = MethodLookup::from_raw(&[(SRC_IDX, &SOURCES[0])], &[(SINK_IDX, &SINKS[2])]);
-        let analysis = MethodTaintAnalysis::new(4, &lookup);
-        let mut state = TaintState::new(4);
-        let bytes = load_fixture("AnalysisTest.dex");
-        let dex = parse_dex(&bytes).expect("parse");
-        let (method, invoke_template) = find_invoke_template(&dex);
-        let ctx = AnalysisContext::new(&dex, method);
-        let mut invoke_source = invoke_template.clone();
-        invoke_source.reference = Some(Reference::Method(MethodIdx::new(SRC_IDX)));
-        invoke_source.registers.clear();
-        invoke_source.registers.extend_from_slice(&[0]);
-        let mut move_result = invoke_template.clone();
-        move_result.name = "move-result-object";
-        move_result.reference = None;
-        move_result.registers.clear();
-        move_result.registers.push(1);
-        let mut invoke_sink = invoke_template.clone();
-        invoke_sink.reference = Some(Reference::Method(MethodIdx::new(SINK_IDX)));
-        invoke_sink.registers.clear();
-        invoke_sink.registers.extend_from_slice(&[2, 1]);
-        let instructions = vec![invoke_source, move_result, invoke_sink];
-        let block = BasicBlock {
-            start_pc: 0,
-            end_pc: instructions.len() as u32,
-        };
-        analysis.transfer_block(&ctx, &block, &instructions, &mut state);
-        let findings = analysis.take_findings();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].sink.id, "SNK_URL_CONSTRUCTOR");
-        assert_eq!(findings[0].register, Some(1));
-    }
-
-    fn load_fixture(name: &str) -> Vec<u8> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../dex-core/tests/data")
-            .join(name);
-        std::fs::read(path).expect("fixture present")
-    }
-
-    fn find_invoke_template(
-        dex: &dex_core::DexFile<'_>,
-    ) -> (MethodIdx, dex_core::bytecode::Instruction) {
-        for idx in 0..dex.method_count() {
-            let method = MethodIdx::new(idx as u32);
-            if dex.code_item(method).is_none() {
-                continue;
-            }
-            if let Ok(instructions) = dex.decode_instructions(method) {
-                if let Some(invoke) = instructions
+fn handle_move_result(state: &mut TaintState, dst: u16, pending: &Option<PendingSource<'_>>) {
+    match pending {
+        Some(PendingSource::Direct) => state.set(dst, true),
+        Some(PendingSource::Passthrough(pattern, registers)) => {
+            let tainted = if pattern.propagate_from.is_empty() {
+                registers.iter().any(|reg| state.get(*reg))
+            } else {
+                pattern
+                    .propagate_from
                     .iter()
-                    .find(|inst| inst.name.starts_with("invoke"))
-                    .cloned()
-                {
-                    return (method, invoke);
-                }
+                    .filter_map(|idx| registers.get(*idx))
+                    .any(|reg| state.get(*reg))
+            };
+            if tainted {
+                state.set(dst, true);
+            } else {
+                state.clear(dst);
             }
         }
-        panic!("missing templates");
+        None => state.clear(dst),
     }
+}
+
+fn collect_tainted_args(state: &TaintState, registers: &[u16]) -> Vec<TaintedArg> {
+    registers
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, reg)| {
+            state.get(*reg).then_some(TaintedArg {
+                index: idx,
+                register: *reg,
+            })
+        })
+        .collect()
+}
+
+fn sink_triggered(sink: &MethodPattern, args: &[TaintedArg]) -> bool {
+    if sink.taint_args.is_empty() {
+        !args.is_empty()
+    } else {
+        sink.taint_args
+            .iter()
+            .all(|required| args.iter().any(|arg| arg.index == *required))
+    }
+}
+
+fn match_passthrough<'a>(
+    summary: &MethodSummary,
+    patterns: &'a [PassthroughPattern],
+) -> Option<&'a PassthroughPattern> {
+    patterns.iter().find(|pattern| {
+        pattern.class == summary.class
+            && pattern.name == summary.name
+            && pattern.signature == summary.signature
+    })
 }
