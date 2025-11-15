@@ -41,6 +41,10 @@ pub struct Instruction {
     reference_kind2: ReferenceType,
     /// Optional secondary reference (used by call-site/method-proto aware formats).
     pub secondary_reference: Option<Reference>,
+    /// Verification error metadata attached to Format20bc instructions.
+    pub verification_error: Option<u8>,
+    /// Quickening metadata produced by odex/ART.
+    pub quickened_info: Option<QuickenedInfo>,
 }
 
 impl Instruction {
@@ -61,6 +65,8 @@ impl Instruction {
             raw: None,
             reference_kind: info.reference,
             reference_kind2: info.reference2,
+            verification_error: None,
+            quickened_info: None,
         }
     }
 
@@ -81,6 +87,8 @@ impl Instruction {
             reference_kind: ReferenceType::None,
             reference_kind2: ReferenceType::None,
             secondary_reference: None,
+            verification_error: None,
+            quickened_info: None,
         }
     }
 
@@ -117,6 +125,22 @@ pub struct ArrayPayload {
     pub size: u32,
     /// Raw little-endian data buffer.
     pub data: Vec<u8>,
+}
+
+/// Metadata emitted by quickened instructions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuickenedInfo {
+    pub kind: QuickenedKind,
+    pub index: u16,
+}
+
+/// Kinds of quickening performed by the runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuickenedKind {
+    InlineCache,
+    InlineCacheRange,
+    VtableIndex,
+    VtableIndexRange,
 }
 
 /// Public helper for decoding instructions from a [`CodeItem`].
@@ -213,6 +237,7 @@ fn decode_format(
             inst.registers
                 .extend_from_slice(&[((byte1 & 0x0F) as u16), ((byte1 >> 4) as u16)]);
         }
+        InstructionFormat::Format20bc => decode_format_20bc(inst, bytes, start)?,
         InstructionFormat::Format20t => {
             inst.offset = Some(read_i16(bytes, start + 2)? as i32);
         }
@@ -321,6 +346,12 @@ fn decode_format(
                 .extend_from_slice(&[read_u16(bytes, start + 2)?, read_u16(bytes, start + 4)?]);
         }
         InstructionFormat::Format35c => decode_format_35c(inst, bytes, start)?,
+        InstructionFormat::Format35mi => {
+            decode_quickened_35mi(inst, bytes, start, QuickenedKind::InlineCache)?
+        }
+        InstructionFormat::Format35ms => {
+            decode_quickened_35mi(inst, bytes, start, QuickenedKind::VtableIndex)?
+        }
         InstructionFormat::Format45cc => decode_format_45cc(inst, bytes, start)?,
         InstructionFormat::Format4rcc => decode_format_4rcc(inst, bytes, start)?,
         InstructionFormat::Format3rc => {
@@ -331,6 +362,12 @@ fn decode_format(
             });
             let idx = read_u16(bytes, start + 2)? as u32;
             inst.reference = decode_reference(inst.reference_kind, idx);
+        }
+        InstructionFormat::Format3rmi => {
+            decode_quickened_3rmi(inst, bytes, start, QuickenedKind::InlineCacheRange)?
+        }
+        InstructionFormat::Format3rms => {
+            decode_quickened_3rmi(inst, bytes, start, QuickenedKind::VtableIndexRange)?
         }
         InstructionFormat::Format51l => {
             inst.registers.push(read_u8(bytes, start + 1)? as u16);
@@ -362,6 +399,69 @@ fn decode_format_35c(inst: &mut Instruction, bytes: &[u8], start: usize) -> DexR
     for reg in regs.iter().take(reg_count) {
         inst.registers.push(*reg);
     }
+    Ok(())
+}
+
+fn decode_format_20bc(inst: &mut Instruction, bytes: &[u8], start: usize) -> DexResult<()> {
+    let meta = read_u8(bytes, start + 1)?;
+    let verification_error = meta & 0x3F;
+    inst.verification_error = Some(verification_error);
+    let type_code = ((meta >> 6) as u16) + 1;
+    let reference_kind = ReferenceType::from_type_code(type_code).ok_or(DexError::Malformed {
+        context: "format20bc",
+        message: "invalid reference type",
+    })?;
+    let idx = read_u16(bytes, start + 2)? as u32;
+    inst.reference = decode_reference(reference_kind, idx);
+    Ok(())
+}
+
+fn decode_quickened_35mi(
+    inst: &mut Instruction,
+    bytes: &[u8],
+    start: usize,
+    kind: QuickenedKind,
+) -> DexResult<()> {
+    let byte1 = read_u8(bytes, start + 1)?;
+    let reg_count = (byte1 >> 4) as usize;
+    let reg_g = byte1 & 0x0F;
+    let inline_idx = read_u16(bytes, start + 2)?;
+    inst.quickened_info = Some(QuickenedInfo {
+        kind,
+        index: inline_idx,
+    });
+
+    let cd = read_u8(bytes, start + 4)?;
+    let ef = read_u8(bytes, start + 5)?;
+    let regs = [
+        (cd & 0x0F) as u16,
+        (cd >> 4) as u16,
+        (ef & 0x0F) as u16,
+        (ef >> 4) as u16,
+        reg_g as u16,
+    ];
+    for reg in regs.iter().take(reg_count) {
+        inst.registers.push(*reg);
+    }
+    Ok(())
+}
+
+fn decode_quickened_3rmi(
+    inst: &mut Instruction,
+    bytes: &[u8],
+    start: usize,
+    kind: QuickenedKind,
+) -> DexResult<()> {
+    let count = read_u8(bytes, start + 1)? as u16;
+    inst.range = Some(RangeInfo {
+        start: read_u16(bytes, start + 4)?,
+        count,
+    });
+    let inline_idx = read_u16(bytes, start + 2)?;
+    inst.quickened_info = Some(QuickenedInfo {
+        kind,
+        index: inline_idx,
+    });
     Ok(())
 }
 
@@ -783,6 +883,47 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn format20bc_decodes_metadata() {
+        let info = OpcodeInfo {
+            opcode: 0x00,
+            name: "test-20bc",
+            format: InstructionFormat::Format20bc,
+            reference: ReferenceType::None,
+            reference2: ReferenceType::None,
+        };
+        let mut inst = Instruction::new(&info, 0);
+        let bytes = [0x00, 0x05, 0x34, 0x12];
+        super::decode_format(&mut inst, &bytes, 0, 0, bytes.len() / 2).expect("decode");
+        assert_eq!(inst.verification_error, Some(5));
+        assert!(matches!(
+            inst.reference,
+            Some(Reference::Type(idx)) if idx.raw() == 0x1234
+        ));
+    }
+
+    #[test]
+    fn quickened_instruction_records_inline_index() {
+        let info = OpcodeInfo {
+            opcode: 0x00,
+            name: "quick",
+            format: InstructionFormat::Format35mi,
+            reference: ReferenceType::None,
+            reference2: ReferenceType::None,
+        };
+        let mut inst = Instruction::new(&info, 0);
+        let bytes = [0x00, 0x21, 0x34, 0x12, 0x32, 0x10];
+        super::decode_format(&mut inst, &bytes, 0, 0, bytes.len() / 2).expect("decode");
+        assert!(matches!(
+            inst.quickened_info,
+            Some(QuickenedInfo {
+                kind: QuickenedKind::InlineCache,
+                index
+            }) if index == 0x1234
+        ));
+        assert_eq!(inst.registers.len(), 2);
+    }
 }
 
 fn decode_reference(kind: ReferenceType, index: u32) -> Option<Reference> {
@@ -938,6 +1079,22 @@ pub enum ReferenceType {
     Proto,
     CallSite,
     MethodHandle,
+}
+
+impl ReferenceType {
+    fn from_type_code(code: u16) -> Option<Self> {
+        match code {
+            0 => Some(Self::String),
+            1 => Some(Self::Type),
+            2 => Some(Self::Field),
+            3 => Some(Self::Method),
+            4 => Some(Self::Proto),
+            5 => Some(Self::CallSite),
+            6 => Some(Self::MethodHandle),
+            7 => Some(Self::None),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

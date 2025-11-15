@@ -35,6 +35,9 @@ pub struct DtoInstruction {
     pub offset: Option<i32>,
     pub reference: Option<DtoReference>,
     pub secondary_reference: Option<DtoReference>,
+    pub verification_error: Option<u8>,
+    pub quickened_kind: Option<String>,
+    pub quickened_index: Option<u16>,
 }
 
 /// Simple CFG DTO with a list of nodes and adjacency.
@@ -110,6 +113,11 @@ pub fn instructions_to_dto(instructions: &[Instruction]) -> Vec<DtoInstruction> 
                         kind: reference.kind_label().to_string(),
                         index: reference.index(),
                     });
+            let quickened_kind = ins
+                .quickened_info
+                .as_ref()
+                .map(|info| format!("{:?}", info.kind));
+            let quickened_index = ins.quickened_info.map(|info| info.index);
             DtoInstruction {
                 pc: ins.pc,
                 opcode: ins.opcode,
@@ -120,6 +128,9 @@ pub fn instructions_to_dto(instructions: &[Instruction]) -> Vec<DtoInstruction> 
                 offset: ins.offset,
                 reference,
                 secondary_reference,
+                verification_error: ins.verification_error,
+                quickened_kind,
+                quickened_index,
             }
         })
         .collect()
