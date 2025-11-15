@@ -1,6 +1,5 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(unused_must_use)]
-#![warn(missing_docs)]
 
 //! `dex-core` is the parsing, modeling, and program-graph foundation for the
 //! `dex-parser-analyzer` workspace.

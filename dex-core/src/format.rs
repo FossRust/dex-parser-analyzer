@@ -14,7 +14,9 @@ pub const SUPPORTED_VERSIONS: &[u16] = &[35, 37, 38, 39, 40, 41];
 macro_rules! define_index {
     ($name:ident) => {
         #[doc = concat!("Strongly typed index for the ", stringify!($name), " table.")]
-        #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+        #[derive(
+            Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize,
+        )]
         pub struct $name(pub u32);
 
         impl $name {

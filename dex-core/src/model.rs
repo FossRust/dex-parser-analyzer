@@ -5,11 +5,11 @@ use std::borrow::Cow;
 use once_cell::unsync::OnceCell;
 
 use crate::{
-    bytecode::{decode_instructions_internal, Instruction},
+    bytecode::{Instruction, decode_instructions_internal},
     error::{DexError, DexResult},
     format::{
-        AccessFlags, ClassDataItem, ClassDef, ClassIdx, CodeItem, FieldId, MethodId, MethodIdx,
-        ProtoId, ProtoIdx, StringId, StringIdx, TypeId, TypeIdx, DexHeader,
+        AccessFlags, ClassDataItem, ClassDef, ClassIdx, CodeItem, DexHeader, FieldId, MethodId,
+        MethodIdx, ProtoId, ProtoIdx, StringId, StringIdx, TypeId, TypeIdx,
     },
 };
 
@@ -106,19 +106,19 @@ impl<'a> DexFile<'a> {
                 index: idx.raw(),
             })?;
         let offset = id.string_data_off as usize;
-        let tail = self.data.get(offset..).ok_or(DexError::SectionOutOfBounds {
-            section: "string_data_item",
-            offset,
-            size: 1,
-        })?;
+        let tail = self
+            .data
+            .get(offset..)
+            .ok_or(DexError::SectionOutOfBounds {
+                section: "string_data_item",
+                offset,
+                size: 1,
+            })?;
         let (len, used) = crate::parser::read_uleb128(tail, "string_data_item")?;
         let data = &tail[used..];
-        let terminator = data
-            .iter()
-            .position(|b| *b == 0)
-            .ok_or(DexError::Mutf8 {
-                offset: id.string_data_off,
-            })?;
+        let terminator = data.iter().position(|b| *b == 0).ok_or(DexError::Mutf8 {
+            offset: id.string_data_off,
+        })?;
         let payload = &data[..terminator];
         if payload.len() < len as usize {
             return Err(DexError::Malformed {
@@ -144,6 +144,11 @@ impl<'a> DexFile<'a> {
     /// Returns the raw [`MethodId`] for the provided index.
     pub fn method_id(&self, idx: MethodIdx) -> Option<&MethodId> {
         self.method_ids.get(idx.to_usize())
+    }
+
+    /// Number of methods in the file.
+    pub fn method_count(&self) -> usize {
+        self.method_ids.len()
     }
 
     /// Returns the [`ProtoId`] for the provided index.
@@ -181,25 +186,28 @@ impl<'a> DexFile<'a> {
         let (class_desc, rest) = descriptor.split_once("->")?;
         let (name, proto) = rest.split_once('(')?;
         let shorty = compute_shorty(&format!("({}", proto))?;
-        self.method_ids.iter().enumerate().find_map(|(idx, method)| {
-            let type_desc = self.type_descriptor(method.class_idx)?;
-            if type_desc != class_desc {
-                return None;
-            }
-            let name_str = self.string(method.name_idx).ok()?;
-            if name_str != name {
-                return None;
-            }
-            let proto_id = self.proto_id(method.proto_idx)?;
-            let stored_shorty = self.string(proto_id.shorty_idx).ok()?;
-            if stored_shorty != shorty {
-                return None;
-            }
-            Some(MethodHandle {
-                dex: self,
-                idx: MethodIdx::new(idx as u32),
+        self.method_ids
+            .iter()
+            .enumerate()
+            .find_map(|(idx, method)| {
+                let type_desc = self.type_descriptor(method.class_idx)?;
+                if type_desc != class_desc {
+                    return None;
+                }
+                let name_str = self.string(method.name_idx)?;
+                if name_str != name {
+                    return None;
+                }
+                let proto_id = self.proto_id(method.proto_idx)?;
+                let stored_shorty = self.string(proto_id.shorty_idx)?;
+                if stored_shorty != shorty {
+                    return None;
+                }
+                Some(MethodHandle {
+                    dex: self,
+                    idx: MethodIdx::new(idx as u32),
+                })
             })
-        })
     }
 
     /// Returns a handle for a method index.
@@ -221,9 +229,9 @@ impl<'a> DexFile<'a> {
     }
 
     /// Returns the owning class of a method.
-    pub fn method_owner(&self, idx: MethodIdx) -> Option<ClassHandle<'a>> {
-        let class_idx = self.method_owner.get(idx.to_usize())?.as_ref()?;
-        self.class(*class_idx)
+    pub fn method_owner(&'a self, idx: MethodIdx) -> Option<ClassHandle<'a>> {
+        let class_idx = *self.method_owner.get(idx.to_usize())?.as_ref()?;
+        self.class(class_idx)
     }
 
     /// Returns a parsed [`CodeItem`] for the given method, if any.
@@ -338,9 +346,8 @@ impl<'a> ClassHandle<'a> {
     /// Returns all encoded methods for this class.
     pub fn methods(&self) -> Option<Vec<MethodHandle<'a>>> {
         let data = self.dex.class_data(self.idx)?;
-        let mut handles = Vec::with_capacity(
-            data.direct_methods.len() + data.virtual_methods.len(),
-        );
+        let mut handles =
+            Vec::with_capacity(data.direct_methods.len() + data.virtual_methods.len());
         for method in data
             .direct_methods
             .iter()
@@ -413,37 +420,29 @@ fn compute_shorty(proto: &str) -> Option<String> {
     if chars.next()? != '(' {
         return None;
     }
+
     let mut shorty = String::new();
-    let mut nesting = 0usize;
-    for ch in chars.by_ref() {
+    while let Some(ch) = chars.next() {
         if ch == ')' {
             break;
         }
         match ch {
-            '[' => {
-                nesting += 1;
-            }
+            '[' => continue,
             'L' => {
                 shorty.push('L');
-                // skip until ';'
                 while let Some(next) = chars.next() {
                     if next == ';' {
                         break;
                     }
                 }
-                nesting = 0;
             }
-            _ => {
-                shorty.push(ch);
-                nesting = 0;
-            }
+            other => shorty.push(other),
         }
     }
 
     if let Some(ret) = chars.next() {
         match ret {
-            'L' => shorty.push('L'),
-            '[' => shorty.push('L'),
+            'L' | '[' => shorty.push('L'),
             other => shorty.push(other),
         }
     }

@@ -1,19 +1,12 @@
 //! Parsing entry points and helpers for `.dex` binaries.
 
-use nom::{
-    bytes::complete::tag,
-    number::complete::{le_u16, le_u32},
-    sequence::tuple,
-    Finish, IResult,
-};
-
 use crate::{
     error::{DexError, DexResult},
     format::{
-        ClassDataItem, ClassDef, ClassIdx, CodeItem, EncodedCatchHandler, EncodedField,
-        EncodedMethod, FieldId, FieldIdx, MethodId, MethodIdx, ProtoId, ProtoIdx, StringId,
-        StringIdx, TypeId, TypeIdx, AccessFlags, CatchHandler, DexHeader, TryItem, HEADER_SIZE,
-        MAGIC_PREFIX,
+        AccessFlags, CatchHandler, ClassDataItem, ClassDef, ClassIdx, CodeItem, DexHeader,
+        EncodedCatchHandler, EncodedField, EncodedMethod, FieldId, FieldIdx, HEADER_SIZE,
+        MAGIC_PREFIX, MethodId, MethodIdx, ProtoId, ProtoIdx, StringId, StringIdx, TryItem, TypeId,
+        TypeIdx,
     },
     model::DexFile,
 };
@@ -104,11 +97,40 @@ fn parse_header(bytes: &[u8]) -> DexResult<DexHeader> {
         })?;
 
     let header_slice = &bytes[..HEADER_SIZE];
-    let (_, (checksum, signature, file_size, header_size, endian_tag, link_size, link_off, map_off, string_ids_size, string_ids_off, type_ids_size, type_ids_off, proto_ids_size, proto_ids_off, field_ids_size, field_ids_off, method_ids_size, method_ids_off, class_defs_size, class_defs_off, data_size, data_off)) =
-        parse_header_body(header_slice).finish().map_err(|_| DexError::Malformed {
-            context: "dex header",
-            message: "header parsing failed",
-        })?;
+    let mut cursor = 8;
+    let checksum = read_u32_from(header_slice, &mut cursor)?;
+    let signature =
+        {
+            let mut sig = [0u8; 20];
+            sig.copy_from_slice(header_slice.get(cursor..cursor + 20).ok_or(
+                DexError::Malformed {
+                    context: "dex header",
+                    message: "signature missing",
+                },
+            )?);
+            cursor += 20;
+            sig
+        };
+    let file_size = read_u32_from(header_slice, &mut cursor)?;
+    let header_size = read_u32_from(header_slice, &mut cursor)?;
+    let endian_tag = read_u32_from(header_slice, &mut cursor)?;
+    let link_size = read_u32_from(header_slice, &mut cursor)?;
+    let link_off = read_u32_from(header_slice, &mut cursor)?;
+    let map_off = read_u32_from(header_slice, &mut cursor)?;
+    let string_ids_size = read_u32_from(header_slice, &mut cursor)?;
+    let string_ids_off = read_u32_from(header_slice, &mut cursor)?;
+    let type_ids_size = read_u32_from(header_slice, &mut cursor)?;
+    let type_ids_off = read_u32_from(header_slice, &mut cursor)?;
+    let proto_ids_size = read_u32_from(header_slice, &mut cursor)?;
+    let proto_ids_off = read_u32_from(header_slice, &mut cursor)?;
+    let field_ids_size = read_u32_from(header_slice, &mut cursor)?;
+    let field_ids_off = read_u32_from(header_slice, &mut cursor)?;
+    let method_ids_size = read_u32_from(header_slice, &mut cursor)?;
+    let method_ids_off = read_u32_from(header_slice, &mut cursor)?;
+    let class_defs_size = read_u32_from(header_slice, &mut cursor)?;
+    let class_defs_off = read_u32_from(header_slice, &mut cursor)?;
+    let data_size = read_u32_from(header_slice, &mut cursor)?;
+    let data_off = read_u32_from(header_slice, &mut cursor)?;
 
     Ok(DexHeader {
         magic,
@@ -138,62 +160,43 @@ fn parse_header(bytes: &[u8]) -> DexResult<DexHeader> {
     })
 }
 
-fn parse_header_body(input: &[u8]) -> IResult<&[u8], (u32, [u8; 20], u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32)> {
-    tuple((
-        le_u32,
-        parse_array20,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-        le_u32,
-    ))(input)
-}
-
-fn parse_array20(input: &[u8]) -> IResult<&[u8], [u8; 20]> {
-    let (rest, bytes) = nom::bytes::complete::take(20usize)(input)?;
-    Ok((rest, bytes.try_into().expect("slice len checked")))
-}
-
-fn slice<'a>(bytes: &'a [u8], offset: u32, size: usize, section: &'static str) -> DexResult<&'a [u8]> {
-    let start = offset as usize;
-    let end = start.checked_add(size).ok_or(DexError::SectionOutOfBounds {
-        section,
-        offset: start,
-        size,
+fn read_u32_from(input: &[u8], cursor: &mut usize) -> DexResult<u32> {
+    let end = *cursor + 4;
+    let bytes = input.get(*cursor..end).ok_or(DexError::Malformed {
+        context: "dex header",
+        message: "unexpected eof",
     })?;
-    bytes
-        .get(start..end)
+    *cursor = end;
+    Ok(u32::from_le_bytes(bytes.try_into().expect("len checked")))
+}
+
+fn slice<'a>(
+    bytes: &'a [u8],
+    offset: u32,
+    size: usize,
+    section: &'static str,
+) -> DexResult<&'a [u8]> {
+    let start = offset as usize;
+    let end = start
+        .checked_add(size)
         .ok_or(DexError::SectionOutOfBounds {
             section,
             offset: start,
             size,
-        })
+        })?;
+    bytes.get(start..end).ok_or(DexError::SectionOutOfBounds {
+        section,
+        offset: start,
+        size,
+    })
 }
 
 fn parse_string_ids(bytes: &[u8], header: &DexHeader) -> DexResult<Box<[StringId]>> {
     let count = header.string_ids_size as usize;
-    let len = count
-        .checked_mul(4)
-        .ok_or(DexError::Malformed {
-            context: "string_ids",
-            message: "size overflow",
-        })?;
+    let len = count.checked_mul(4).ok_or(DexError::Malformed {
+        context: "string_ids",
+        message: "size overflow",
+    })?;
     let section = slice(bytes, header.string_ids_off, len, "string_ids")?;
     let mut out = Vec::with_capacity(count);
     for chunk in section.chunks_exact(4) {
@@ -346,10 +349,12 @@ fn parse_encoded_fields(
         *cursor += used;
         let (access_flags, used) = read_uleb128(&bytes[*cursor..], "encoded_field")?;
         *cursor += used;
-        running = running.checked_add(field_idx_diff).ok_or(DexError::Malformed {
-            context: "encoded_field",
-            message: "field index overflow",
-        })?;
+        running = running
+            .checked_add(field_idx_diff)
+            .ok_or(DexError::Malformed {
+                context: "encoded_field",
+                message: "field index overflow",
+            })?;
         out.push(EncodedField {
             field_idx: FieldIdx::new(running),
             access_flags: AccessFlags::from_bits_truncate(access_flags),
@@ -372,10 +377,12 @@ fn parse_encoded_methods(
         *cursor += used;
         let (code_off, used) = read_uleb128(&bytes[*cursor..], "encoded_method")?;
         *cursor += used;
-        running = running.checked_add(method_idx_diff).ok_or(DexError::Malformed {
-            context: "encoded_method",
-            message: "method index overflow",
-        })?;
+        running = running
+            .checked_add(method_idx_diff)
+            .ok_or(DexError::Malformed {
+                context: "encoded_method",
+                message: "method index overflow",
+            })?;
         out.push(EncodedMethod {
             method_idx: MethodIdx::new(running),
             access_flags: AccessFlags::from_bits_truncate(access_flags),
@@ -408,7 +415,11 @@ fn parse_code_item<'a>(bytes: &'a [u8], offset: u32) -> DexResult<CodeItem<'a>> 
     let insns = slice(bytes, cursor_u32, insns_byte_len, "code_item")?;
     cursor += insns_byte_len;
 
-    let padding = if tries_size > 0 && insns_size % 2 != 0 { 2 } else { 0 };
+    let padding = if tries_size > 0 && insns_size % 2 != 0 {
+        2
+    } else {
+        0
+    };
     cursor += padding as usize;
 
     let mut tries = Vec::with_capacity(tries_size as usize);
