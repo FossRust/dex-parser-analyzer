@@ -1,12 +1,6 @@
 # dex-parser-analyzer
-Dex Parser and Static Analysis tool (and GUI) written in Rust
 
-## Workspace Layout
-
-- `dex-core`: zero-copy DEX parser plus modeling/helpers (strings, CFGs, graphs, DTOs).
-- `dex-analysis`: higher-level static analysis primitives that build on `dex-core`, starting with the reusable forward data-flow framework extracted from `dex-core/src/analysis`.
-- `dex-cli`: command-line interface that prints parser summaries plus analyzer findings.
-- `dex-gui`: Leptos WASM GUI that lets you upload a `.dex` and explore metrics/findings.
+High-performance DEX parser and static analysis toolkit in Rust, usable from any language, via CLI, or fully in-browser—no dex files ever leave your machine.
 
 ## Sample usage
 
@@ -47,5 +41,12 @@ fn run_analysis(bytes: &[u8]) -> anyhow::Result<()> {
 ```bash
 cargo run -p dex-cli -- path/to/classes.dex --max-findings 25
 ```
+
+## Workspace Layout
+
+- `dex-core`: zero-copy DEX parser plus modeling/helpers (strings, CFGs, graphs, DTOs).
+- `dex-analysis`: higher-level static analysis primitives that build on `dex-core`, starting with the reusable forward data-flow framework extracted from `dex-core/src/analysis`.
+- `dex-cli`: command-line interface that prints parser summaries plus analyzer findings.
+- `dex-gui`: Leptos WASM GUI that lets you upload a `.dex` and explore metrics/findings.
 
 > Privacy note: the `dex-gui` web app runs completely inside your browser via Rust-to-WASM, so the uploaded `.dex` never leaves your machine. Prefer server-side automation? Compile the same logic to a WebAssembly module and host it behind [Extism](https://extism.org/) (or any WASM runtime) to call it from Rust or other languages.
