@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "dex-core"
+]
+resolver = "2"
