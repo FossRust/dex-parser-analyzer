@@ -35,6 +35,19 @@ fn pattern_checks_detect_hardcoded_secret() {
 }
 
 #[test]
+fn pattern_checks_detect_insecure_http_literal() {
+    let mut config = AnalysisConfig::default();
+    config.enable_structural_checks = false;
+    config.enable_taint_checks = false;
+    config.max_findings = None;
+    let report = run_with_fixture("Annotation_classes.dex", config);
+    assert!(
+        report.findings.iter().any(|f| f.id == "M5_INSECURE_HTTP"),
+        "expected insecure http finding"
+    );
+}
+
+#[test]
 fn weak_crypto_detection_reports_cipher_usage() {
     let mut config = AnalysisConfig::default();
     config.enable_pattern_checks = true;

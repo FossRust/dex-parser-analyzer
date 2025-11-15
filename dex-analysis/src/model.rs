@@ -23,6 +23,7 @@ pub enum VulnerabilityKind {
     HardcodedSecret,
     WeakCrypto,
     InsecureRandom,
+    InsecureCommunication,
     Custom(Cow<'static, str>),
 }
 

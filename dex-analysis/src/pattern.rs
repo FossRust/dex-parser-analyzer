@@ -100,6 +100,7 @@ pub fn run_pattern_checks(
     };
     let string_to_methods = build_string_to_methods(&xrefs);
     detect_hardcoded_secrets(dex, config, findings, &string_to_methods);
+    detect_insecure_http(dex, findings, &string_to_methods);
     detect_weak_crypto(dex, findings, &xrefs, &string_to_methods);
 }
 
@@ -242,6 +243,57 @@ fn detect_weak_crypto(
             message: "Cipher APIs referenced but no invocations were resolved".to_string(),
             extra: json!({ "reason": "cipher_descriptor" }),
         });
+    }
+}
+
+fn detect_insecure_http(
+    dex: &DexFile<'_>,
+    findings: &mut Vec<Finding>,
+    string_map: &HashMap<u32, Vec<u32>>,
+) {
+    let mut emitted = HashSet::new();
+    for idx in 0..dex.string_count() {
+        let idx_u32 = idx as u32;
+        let Some(value) = dex.string(StringIdx::new(idx_u32)) else {
+            continue;
+        };
+        if !value.contains("http://") {
+            continue;
+        }
+        let message = format!(
+            "Insecure HTTP literal `{}` detected",
+            preview_literal(value)
+        );
+        if let Some(methods) = string_map.get(&idx_u32) {
+            for method in methods {
+                if !emitted.insert((*method, idx_u32)) {
+                    continue;
+                }
+                findings.push(Finding {
+                    id: "M5_INSECURE_HTTP".into(),
+                    kind: VulnerabilityKind::InsecureCommunication,
+                    severity: Severity::Medium,
+                    location: Location::from_method(dex, MethodIdx::new(*method), None),
+                    message: message.clone(),
+                    extra: json!({
+                        "literal": value,
+                        "kind": "http_literal",
+                    }),
+                });
+            }
+        } else if emitted.insert((u32::MAX, idx_u32)) {
+            findings.push(Finding {
+                id: "M5_INSECURE_HTTP".into(),
+                kind: VulnerabilityKind::InsecureCommunication,
+                severity: Severity::Medium,
+                location: Location::unknown(),
+                message: message.clone(),
+                extra: json!({
+                    "literal": value,
+                    "kind": "http_literal",
+                }),
+            });
+        }
     }
 }
 

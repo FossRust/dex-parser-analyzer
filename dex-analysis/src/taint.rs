@@ -36,6 +36,20 @@ const SOURCES: &[MethodPattern] = &[
         signature: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
         description: "SharedPreferences.getString",
     },
+    MethodPattern {
+        id: "SRC_TELEPHONY_IMEI",
+        class: "Landroid/telephony/TelephonyManager;",
+        name: "getDeviceId",
+        signature: "()Ljava/lang/String;",
+        description: "TelephonyManager.getDeviceId",
+    },
+    MethodPattern {
+        id: "SRC_SECURE_SETTINGS",
+        class: "Landroid/provider/Settings$Secure;",
+        name: "getString",
+        signature: "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;",
+        description: "Settings.Secure.getString",
+    },
 ];
 
 const SINKS: &[MethodPattern] = &[
@@ -52,6 +66,20 @@ const SINKS: &[MethodPattern] = &[
         name: "e",
         signature: "(Ljava/lang/String;Ljava/lang/String;)I",
         description: "Log.e",
+    },
+    MethodPattern {
+        id: "SNK_URL_CONSTRUCTOR",
+        class: "Ljava/net/URL;",
+        name: "<init>",
+        signature: "(Ljava/lang/String;)V",
+        description: "java.net.URL.<init>",
+    },
+    MethodPattern {
+        id: "SNK_WEBVIEW_LOAD_URL",
+        class: "Landroid/webkit/WebView;",
+        name: "loadUrl",
+        signature: "(Ljava/lang/String;)V",
+        description: "WebView.loadUrl",
     },
 ];
 
@@ -126,6 +154,22 @@ impl MethodLookup {
                     sinks.insert(idx as u32, sink);
                 }
             }
+        }
+        Self { sources, sinks }
+    }
+
+    #[cfg(test)]
+    fn from_raw(
+        sources_entries: &[(u32, &'static MethodPattern)],
+        sink_entries: &[(u32, &'static MethodPattern)],
+    ) -> Self {
+        let mut sources = HashMap::new();
+        let mut sinks = HashMap::new();
+        for (idx, pattern) in sources_entries {
+            sources.insert(*idx, *pattern);
+        }
+        for (idx, pattern) in sink_entries {
+            sinks.insert(*idx, *pattern);
         }
         Self { sources, sinks }
     }
@@ -286,4 +330,75 @@ fn referenced_registers(inst: &Instruction) -> Vec<u16> {
         return (0..count).map(|offset| (start + offset) as u16).collect();
     }
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_flow::AnalysisContext;
+    use dex_core::{bytecode::Reference, graphs::BasicBlock, parse_dex};
+
+    #[test]
+    fn tainted_source_reaching_url_sink_triggers_finding() {
+        const SRC_IDX: u32 = 1;
+        const SINK_IDX: u32 = 2;
+        let lookup = MethodLookup::from_raw(&[(SRC_IDX, &SOURCES[0])], &[(SINK_IDX, &SINKS[2])]);
+        let analysis = MethodTaintAnalysis::new(4, &lookup);
+        let mut state = TaintState::new(4);
+        let bytes = load_fixture("AnalysisTest.dex");
+        let dex = parse_dex(&bytes).expect("parse");
+        let (method, invoke_template) = find_invoke_template(&dex);
+        let ctx = AnalysisContext::new(&dex, method);
+        let mut invoke_source = invoke_template.clone();
+        invoke_source.reference = Some(Reference::Method(MethodIdx::new(SRC_IDX)));
+        invoke_source.registers.clear();
+        invoke_source.registers.extend_from_slice(&[0]);
+        let mut move_result = invoke_template.clone();
+        move_result.name = "move-result-object";
+        move_result.reference = None;
+        move_result.registers.clear();
+        move_result.registers.push(1);
+        let mut invoke_sink = invoke_template.clone();
+        invoke_sink.reference = Some(Reference::Method(MethodIdx::new(SINK_IDX)));
+        invoke_sink.registers.clear();
+        invoke_sink.registers.extend_from_slice(&[2, 1]);
+        let instructions = vec![invoke_source, move_result, invoke_sink];
+        let block = BasicBlock {
+            start_pc: 0,
+            end_pc: instructions.len() as u32,
+        };
+        analysis.transfer_block(&ctx, &block, &instructions, &mut state);
+        let findings = analysis.take_findings();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].sink.id, "SNK_URL_CONSTRUCTOR");
+        assert_eq!(findings[0].register, Some(1));
+    }
+
+    fn load_fixture(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../dex-core/tests/data")
+            .join(name);
+        std::fs::read(path).expect("fixture present")
+    }
+
+    fn find_invoke_template(
+        dex: &dex_core::DexFile<'_>,
+    ) -> (MethodIdx, dex_core::bytecode::Instruction) {
+        for idx in 0..dex.method_count() {
+            let method = MethodIdx::new(idx as u32);
+            if dex.code_item(method).is_none() {
+                continue;
+            }
+            if let Ok(instructions) = dex.decode_instructions(method) {
+                if let Some(invoke) = instructions
+                    .iter()
+                    .find(|inst| inst.name.starts_with("invoke"))
+                    .cloned()
+                {
+                    return (method, invoke);
+                }
+            }
+        }
+        panic!("missing templates");
+    }
 }
