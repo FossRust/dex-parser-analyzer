@@ -3,9 +3,10 @@
 use crate::{
     error::{DexError, DexResult},
     format::{
-        AccessFlags, CatchHandler, ClassDataItem, ClassDef, ClassIdx, CodeItem, DexHeader,
-        EncodedCatchHandler, EncodedField, EncodedMethod, FieldId, FieldIdx, HEADER_SIZE,
-        MAGIC_PREFIX, MethodId, MethodIdx, ProtoId, ProtoIdx, StringId, StringIdx, TryItem, TypeId,
+        AccessFlags, AnnotationsDirectoryItem, CatchHandler, ClassDataItem, ClassDef, ClassIdx,
+        CodeItem, DexHeader, EncodedCatchHandler, EncodedField, EncodedMethod, FieldAnnotation,
+        FieldId, FieldIdx, HEADER_SIZE, MAGIC_PREFIX, MapItem, MethodAnnotation, MethodId,
+        MethodIdx, ParameterAnnotation, ProtoId, ProtoIdx, StringId, StringIdx, TryItem, TypeId,
         TypeIdx,
     },
     model::DexFile,
@@ -27,6 +28,9 @@ pub fn parse_dex<'a>(bytes: &'a [u8]) -> DexResult<DexFile<'a>> {
         });
     }
 
+    let mut map_items = parse_map_list(bytes, &header)?;
+    map_items.sort_by_key(|item| item.offset);
+
     let string_ids = parse_string_ids(bytes, &header)?;
     let type_ids = parse_type_ids(bytes, &header)?;
     let proto_ids = parse_proto_ids(bytes, &header)?;
@@ -38,15 +42,27 @@ pub fn parse_dex<'a>(bytes: &'a [u8]) -> DexResult<DexFile<'a>> {
     let mut method_code = vec![None; method_ids.len()];
     let mut method_owner = vec![None; method_ids.len()];
     let mut method_access = vec![AccessFlags::empty(); method_ids.len()];
+    let mut annotations = Vec::with_capacity(class_defs.len());
 
     for (idx, class_def) in class_defs.iter().enumerate() {
         let class_idx = ClassIdx::new(idx as u32);
         if class_def.class_data_off == 0 {
             class_data_items.push(None);
+            annotations.push(None);
             continue;
         }
 
         let class_data = parse_class_data(bytes, class_def.class_data_off)?;
+        let annotation_dir = if class_def.annotations_off != 0 {
+            Some(parse_annotations_directory(
+                bytes,
+                class_def.annotations_off,
+            )?)
+        } else {
+            None
+        };
+        annotations.push(annotation_dir);
+
         for method in class_data
             .direct_methods
             .iter()
@@ -62,6 +78,17 @@ pub fn parse_dex<'a>(bytes: &'a [u8]) -> DexResult<DexFile<'a>> {
         class_data_items.push(Some(class_data));
     }
 
+    let link_data = if header.link_size > 0 {
+        Some(slice(
+            bytes,
+            header.link_off,
+            header.link_size as usize,
+            "link_data",
+        )?)
+    } else {
+        None
+    };
+
     Ok(DexFile::new(
         bytes,
         header,
@@ -75,6 +102,9 @@ pub fn parse_dex<'a>(bytes: &'a [u8]) -> DexResult<DexFile<'a>> {
         method_owner,
         method_access,
         method_code,
+        map_items,
+        annotations,
+        link_data,
     ))
 }
 
@@ -558,4 +588,70 @@ pub(crate) fn read_sleb128(input: &[u8], context: &'static str) -> DexResult<(i3
         result |= !0 << shift;
     }
     Ok((result, byte_count))
+}
+
+fn parse_map_list(bytes: &[u8], header: &DexHeader) -> DexResult<Vec<MapItem>> {
+    if header.map_off == 0 {
+        return Ok(Vec::new());
+    }
+    let mut cursor = header.map_off as usize;
+    let size = read_u32(bytes, &mut cursor)? as usize;
+    let mut items = Vec::with_capacity(size);
+    for _ in 0..size {
+        let type_code = read_u16(bytes, &mut cursor)?;
+        cursor += 2; // unused field
+        let section_size = read_u32(bytes, &mut cursor)?;
+        let offset = read_u32(bytes, &mut cursor)?;
+        items.push(MapItem {
+            type_code,
+            size: section_size,
+            offset,
+        });
+    }
+    Ok(items)
+}
+
+fn parse_annotations_directory(bytes: &[u8], offset: u32) -> DexResult<AnnotationsDirectoryItem> {
+    let mut cursor = offset as usize;
+    let class_off = read_u32(bytes, &mut cursor)?;
+    let fields_size = read_u32(bytes, &mut cursor)? as usize;
+    let methods_size = read_u32(bytes, &mut cursor)? as usize;
+    let params_size = read_u32(bytes, &mut cursor)? as usize;
+
+    let mut field_annotations = Vec::with_capacity(fields_size);
+    for _ in 0..fields_size {
+        let field_idx = read_u32(bytes, &mut cursor)?;
+        let annotations_offset = read_u32(bytes, &mut cursor)?;
+        field_annotations.push(FieldAnnotation {
+            field_idx: FieldIdx::new(field_idx),
+            annotations_offset,
+        });
+    }
+
+    let mut method_annotations = Vec::with_capacity(methods_size);
+    for _ in 0..methods_size {
+        let method_idx = read_u32(bytes, &mut cursor)?;
+        let annotations_offset = read_u32(bytes, &mut cursor)?;
+        method_annotations.push(MethodAnnotation {
+            method_idx: MethodIdx::new(method_idx),
+            annotations_offset,
+        });
+    }
+
+    let mut parameter_annotations = Vec::with_capacity(params_size);
+    for _ in 0..params_size {
+        let method_idx = read_u32(bytes, &mut cursor)?;
+        let annotations_offset = read_u32(bytes, &mut cursor)?;
+        parameter_annotations.push(ParameterAnnotation {
+            method_idx: MethodIdx::new(method_idx),
+            annotations_offset,
+        });
+    }
+
+    Ok(AnnotationsDirectoryItem {
+        class_annotations_off: (class_off != 0).then_some(class_off),
+        field_annotations,
+        method_annotations,
+        parameter_annotations,
+    })
 }

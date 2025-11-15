@@ -1,4 +1,4 @@
-use dex_core::{bytecode::Reference, parse_dex};
+use dex_core::{bytecode::Reference, format, parse_dex};
 
 fn load_fixture() -> Vec<u8> {
     std::fs::read("tests/data/Test.dex").expect("missing fixture")
@@ -11,6 +11,8 @@ fn parse_test_dex_header() {
     let class = dex.classes().next().expect("expected class entry");
     assert_eq!(class.descriptor().unwrap(), "LTest;");
     assert!(dex.strings().any(|s| s == "Test.java"));
+    assert!(!dex.map_items().is_empty());
+    assert!(dex.section_bytes(format::MAP_TYPE_TYPE_ID_ITEM).is_some());
 }
 
 #[test]

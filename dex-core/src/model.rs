@@ -8,8 +8,9 @@ use crate::{
     bytecode::{Instruction, decode_instructions_internal},
     error::{DexError, DexResult},
     format::{
-        AccessFlags, ClassDataItem, ClassDef, ClassIdx, CodeItem, DexHeader, FieldId, MethodId,
-        MethodIdx, ProtoId, ProtoIdx, StringId, StringIdx, TypeId, TypeIdx,
+        AccessFlags, AnnotationsDirectoryItem, ClassDataItem, ClassDef, ClassIdx, CodeItem,
+        DexHeader, FieldId, MapItem, MethodId, MethodIdx, ProtoId, ProtoIdx, StringId, StringIdx,
+        TypeId, TypeIdx,
     },
 };
 
@@ -32,6 +33,10 @@ pub struct DexFile<'a> {
     method_access: Vec<AccessFlags>,
     method_code: Vec<Option<CodeItem<'a>>>,
     string_cache: Vec<OnceCell<String>>,
+    map_items: Box<[MapItem]>,
+    annotations: Vec<Option<AnnotationsDirectoryItem>>,
+    link_data: Option<&'a [u8]>,
+    data_end: usize,
 }
 
 impl<'a> DexFile<'a> {
@@ -49,6 +54,9 @@ impl<'a> DexFile<'a> {
         method_owner: Vec<Option<ClassIdx>>,
         method_access: Vec<AccessFlags>,
         method_code: Vec<Option<CodeItem<'a>>>,
+        map_items: Vec<MapItem>,
+        annotations: Vec<Option<AnnotationsDirectoryItem>>,
+        link_data: Option<&'a [u8]>,
     ) -> Self {
         let string_cache = vec![OnceCell::new(); string_ids.len()];
         Self {
@@ -65,6 +73,10 @@ impl<'a> DexFile<'a> {
             method_access,
             method_code,
             string_cache,
+            map_items: map_items.into_boxed_slice(),
+            annotations,
+            link_data,
+            data_end: (header.data_off + header.data_size) as usize,
         }
     }
 
@@ -72,6 +84,42 @@ impl<'a> DexFile<'a> {
     #[must_use]
     pub fn header(&self) -> &DexHeader {
         &self.header
+    }
+
+    /// Returns the parsed `map_list` entries.
+    pub fn map_items(&self) -> &[MapItem] {
+        &self.map_items
+    }
+
+    /// Returns the optional link data section, if present.
+    pub fn link_data(&self) -> Option<&'a [u8]> {
+        self.link_data
+    }
+
+    /// Returns the annotations directory for the given class.
+    pub fn annotations_directory(&self, idx: ClassIdx) -> Option<&AnnotationsDirectoryItem> {
+        self.annotations.get(idx.to_usize())?.as_ref()
+    }
+
+    /// Returns a raw slice covering the section identified by the map type.
+    pub fn section_bytes(&self, type_code: u16) -> Option<&'a [u8]> {
+        let entry = self
+            .map_items
+            .iter()
+            .filter(|item| item.type_code == type_code && item.offset != 0)
+            .min_by_key(|item| item.offset)?;
+        let start = entry.offset as usize;
+        let next_offset = self
+            .map_items
+            .iter()
+            .filter(|item| item.offset as usize > start)
+            .map(|item| item.offset as usize)
+            .min()
+            .unwrap_or(self.data_end);
+        if next_offset <= start || next_offset > self.data.len() {
+            return None;
+        }
+        self.data.get(start..next_offset)
     }
 
     /// Returns all strings as an iterator.

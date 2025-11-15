@@ -11,6 +11,29 @@ pub const MAGIC_PREFIX: &[u8; 4] = b"dex\n";
 /// Known versions supported by this crate.
 pub const SUPPORTED_VERSIONS: &[u16] = &[35, 37, 38, 39, 40, 41];
 
+/// Map item type codes used in `map_list`.
+pub const MAP_TYPE_HEADER_ITEM: u16 = 0x0000;
+pub const MAP_TYPE_STRING_ID_ITEM: u16 = 0x0001;
+pub const MAP_TYPE_TYPE_ID_ITEM: u16 = 0x0002;
+pub const MAP_TYPE_PROTO_ID_ITEM: u16 = 0x0003;
+pub const MAP_TYPE_FIELD_ID_ITEM: u16 = 0x0004;
+pub const MAP_TYPE_METHOD_ID_ITEM: u16 = 0x0005;
+pub const MAP_TYPE_CLASS_DEF_ITEM: u16 = 0x0006;
+pub const MAP_TYPE_CALL_SITE_ID_ITEM: u16 = 0x0007;
+pub const MAP_TYPE_METHOD_HANDLE_ITEM: u16 = 0x0008;
+pub const MAP_TYPE_MAP_LIST: u16 = 0x1000;
+pub const MAP_TYPE_TYPE_LIST: u16 = 0x1001;
+pub const MAP_TYPE_ANNOTATION_SET_REF_LIST: u16 = 0x1002;
+pub const MAP_TYPE_ANNOTATION_SET_ITEM: u16 = 0x1003;
+pub const MAP_TYPE_CLASS_DATA_ITEM: u16 = 0x2000;
+pub const MAP_TYPE_CODE_ITEM: u16 = 0x2001;
+pub const MAP_TYPE_STRING_DATA_ITEM: u16 = 0x2002;
+pub const MAP_TYPE_DEBUG_INFO_ITEM: u16 = 0x2003;
+pub const MAP_TYPE_ANNOTATION_ITEM: u16 = 0x2004;
+pub const MAP_TYPE_ENCODED_ARRAY_ITEM: u16 = 0x2005;
+pub const MAP_TYPE_ANNOTATIONS_DIRECTORY_ITEM: u16 = 0x2006;
+pub const MAP_TYPE_HIDDENAPI_CLASS_DATA_ITEM: u16 = 0x2007;
+
 macro_rules! define_index {
     ($name:ident) => {
         #[doc = concat!("Strongly typed index for the ", stringify!($name), " table.")]
@@ -49,6 +72,17 @@ define_index!(MethodIdx);
 define_index!(ClassIdx);
 define_index!(CallSiteIdx);
 define_index!(MethodHandleIdx);
+
+/// Entry inside the `map_list` section.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct MapItem {
+    /// Section type identifier.
+    pub type_code: u16,
+    /// Number of items present.
+    pub size: u32,
+    /// File offset for the first byte of the section.
+    pub offset: u32,
+}
 
 /// Representation of the DEX header (`header_item`).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -234,4 +268,34 @@ pub struct ClassDataItem {
     pub instance_fields: Vec<EncodedField>,
     pub direct_methods: Vec<EncodedMethod>,
     pub virtual_methods: Vec<EncodedMethod>,
+}
+
+/// Parsed `annotations_directory_item` contents.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnnotationsDirectoryItem {
+    pub class_annotations_off: Option<u32>,
+    pub field_annotations: Vec<FieldAnnotation>,
+    pub method_annotations: Vec<MethodAnnotation>,
+    pub parameter_annotations: Vec<ParameterAnnotation>,
+}
+
+/// Field-level annotation metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FieldAnnotation {
+    pub field_idx: FieldIdx,
+    pub annotations_offset: u32,
+}
+
+/// Method-level annotation metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MethodAnnotation {
+    pub method_idx: MethodIdx,
+    pub annotations_offset: u32,
+}
+
+/// Parameter-level annotation metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParameterAnnotation {
+    pub method_idx: MethodIdx,
+    pub annotations_offset: u32,
 }
