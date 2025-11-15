@@ -946,7 +946,16 @@ fn skip_encoded_value(bytes: &[u8], cursor: &mut usize) -> DexResult<()> {
     let value_type = header & 0x1F;
     let value_arg = (header >> 5) as usize;
     match value_type {
-        0x00 | 0x02 | 0x03 | 0x04 | 0x06 | 0x10 | 0x11 => {
+        0x1C => {
+            skip_encoded_array(bytes, cursor)?;
+        }
+        0x1D => {
+            skip_encoded_annotation(bytes, cursor)?;
+        }
+        0x1E | 0x1F => {
+            // null or boolean; nothing else to consume.
+        }
+        _ => {
             let size = value_arg + 1;
             let end = cursor
                 .checked_add(size)
@@ -963,24 +972,6 @@ fn skip_encoded_value(bytes: &[u8], cursor: &mut usize) -> DexResult<()> {
                 });
             }
             *cursor = end;
-        }
-        0x15 | 0x16 | 0x17 | 0x18 | 0x19 | 0x1A | 0x1B => {
-            let _ = read_uleb_from(bytes, cursor, "encoded_value")?;
-        }
-        0x1C => {
-            skip_encoded_array(bytes, cursor)?;
-        }
-        0x1D => {
-            skip_encoded_annotation(bytes, cursor)?;
-        }
-        0x1E | 0x1F => {
-            // null or boolean; nothing else to consume.
-        }
-        _ => {
-            return Err(DexError::Malformed {
-                context: "encoded_value",
-                message: "unknown value type",
-            });
         }
     }
     Ok(())

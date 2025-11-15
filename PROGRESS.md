@@ -13,6 +13,7 @@
 - Implemented ART/odex extensions: Format20bc instructions now record verification metadata, quickened opcodes (35mi/35ms/3rmi/3rms) capture inline/vtable indices, DTOs expose the new fields, and tests cover these cases.
 - Added multi-dex unpacking helpers based on the `zip` crate (`read_dex_buffers_from_apk`/`from_buffers`) and tests that unpack the bundled `multidex.apk` fixture.
 - Expanded Rustdoc coverage for map/annotation helpers, semantic utilities, graphs (CFG/call-graph/xrefs), DTOs, and section accessor APIs so downstream users have examples for every public entry point.
+- Reworked CFG construction to emit real basic blocks with fallthrough, branch, switch, and exception edges; call graphs now understand polymorphic invokes; xref modeling tracks string/field/type/proto/call-site/method-handle references with regression tests.
 - Parsed optional map_list-driven sections (type lists, annotation set refs/items, annotation items, encoded arrays, call-site and method-handle tables) and surfaced them via `DexFile` so downstream analyzers can inspect data that isn’t referenced directly by class data. Added tests ensuring proto parameter offsets and static value arrays resolve through the new APIs.
 
 ## Next Steps

@@ -93,6 +93,16 @@ pub struct DtoXrefs {
     pub method_calls: Vec<(u32, u32)>,
     /// `(method, string)` tuples.
     pub method_strings: Vec<(u32, u32)>,
+    /// `(method, field)` tuples.
+    pub method_fields: Vec<(u32, u32)>,
+    /// `(method, type)` tuples.
+    pub method_types: Vec<(u32, u32)>,
+    /// `(method, proto)` tuples.
+    pub method_protos: Vec<(u32, u32)>,
+    /// `(method, call_site)` tuples.
+    pub method_call_sites: Vec<(u32, u32)>,
+    /// `(method, method_handle)` tuples.
+    pub method_method_handles: Vec<(u32, u32)>,
 }
 
 /// Metadata about an indexed reference used by an instruction.
