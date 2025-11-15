@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = ["dex-analysis",
     "dex-core"
 ]
 resolver = "2"

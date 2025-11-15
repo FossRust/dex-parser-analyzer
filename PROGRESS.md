@@ -16,9 +16,10 @@
 - Reworked CFG construction to emit real basic blocks with fallthrough, branch, switch, and exception edges; call graphs now understand polymorphic invokes; xref modeling tracks string/field/type/proto/call-site/method-handle references with regression tests.
 - Multi-dex helpers now build shared class/method/string/type pools with multi-location lookups, canonical method descriptors (including prototypes), and tests covering duplicate descriptors across dex files.
 - Parsed optional map_list-driven sections (type lists, annotation set refs/items, annotation items, encoded arrays, call-site and method-handle tables) and surfaced them via `DexFile` so downstream analyzers can inspect data that isn’t referenced directly by class data. Added tests ensuring proto parameter offsets and static value arrays resolve through the new APIs.
+- Audited overall parser coverage so far: confirmed every mandatory table, bytecode payload, and multi-dex helper is implemented while documenting the remaining optional sections (debug info, hidden-API metadata, checksum/signature validation) that still need wire-up work.
 
 ## Next Steps
-1. Build additional fixtures/property tests to stress annotation value decoding (including hidden API payloads) plus graph builders and bytecode decoding beyond the current synthetic samples (e.g., multi-dex APK unpacking).
-2. Wire up CI scripts (fmt/clippy/test) and extend the top-level README with usage examples for `dex-core`.
-3. Expose serde DTOs for graphs/xrefs to higher layers (`dex-analysis`, `dex-gui`) and prototype data flow integrations.
-4. Plan multi-dex coordination utilities (parsing multiple `classes*.dex` buffers and linking cross-dex references).
+1. Enforce header/file integrity by verifying checksum/signature/file_size/endian_tag values against the input buffer so corrupt or truncated dex files are rejected earlier.
+2. Parse and surface the remaining map_list entries we currently skip (e.g., `debug_info_item`, hidden-API metadata) and add ergonomic getters/DTOs for that data.
+3. Expand the fixture+property-test matrix to include annotation-heavy dexes, odex/quickened samples, multi-dex APKs, and regression files that stress annotation decoding, quickening metadata, and the new optional sections.
+4. Flesh out higher-level exports (serde DTOs for graphs/xrefs/debug info) and document usage in the workspace README/CI scripts so `dex-analysis`/GUI consumers can immediately leverage the richer parser surface.

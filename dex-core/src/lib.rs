@@ -2,7 +2,8 @@
 #![deny(unused_must_use)]
 
 //! `dex-core` is the parsing, modeling, and program-graph foundation for the
-//! `dex-parser-analyzer` workspace.
+//! `dex-parser-analyzer` workspace. Higher-level analyzers live in the sibling
+//! `dex-analysis` crate.
 
 pub mod analysis;
 pub mod bytecode;
@@ -16,6 +17,6 @@ pub mod semantics;
 
 mod error;
 
-pub use crate::error::DexError;
+pub use crate::error::{DexError, DexResult};
 pub use crate::model::{ClassHandle, DexFile, MethodHandle};
 pub use crate::parser::parse_dex;

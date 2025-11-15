@@ -10,8 +10,8 @@ use std::collections::{HashMap, VecDeque};
 use petgraph::{Direction, graph::NodeIndex, visit::NodeIndexable};
 
 use crate::{
+    DexResult,
     bytecode::Instruction,
-    error::DexResult,
     format::MethodIdx,
     graphs::{self, BasicBlock, Cfg},
     model::DexFile,

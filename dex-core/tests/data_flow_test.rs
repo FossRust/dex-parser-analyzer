@@ -74,7 +74,10 @@ fn opcode_collector_matches_instruction_set() {
 }
 
 fn load_fixture(name: &str) -> Vec<u8> {
-    std::fs::read(format!("tests/data/{name}")).expect("missing fixture")
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dex-core/tests/data")
+        .join(name);
+    std::fs::read(path).expect("missing fixture")
 }
 
 fn first_method_with_code(dex: &dex_core::DexFile<'_>) -> MethodIdx {
