@@ -2,6 +2,8 @@
 
 High-performance DEX parser and static analysis toolkit in Rust, usable from any language, via CLI, or fully in-browser—no dex files ever leave your machine.
 
+In-browser demo: https://fossrust.github.io/dex-parser-analyzer/
+
 ## Sample usage
 
 ### dex-core
