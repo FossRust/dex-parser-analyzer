@@ -1,4 +1,7 @@
-use dex_core::{multidex::MultiDex, parse_dex};
+use dex_core::{
+    multidex::{MultiDex, read_dex_buffers_from_apk},
+    parse_dex,
+};
 
 fn load(bytes_path: &str) -> Vec<u8> {
     std::fs::read(bytes_path).expect("fixture missing")
@@ -30,4 +33,12 @@ fn find_class_and_string_across_dexes() {
         .find_string("AnalysisTest.java")
         .expect("string literal");
     assert_eq!(string_literal, "AnalysisTest.java");
+}
+
+#[test]
+fn unpack_multidex_apk() {
+    let buffers = read_dex_buffers_from_apk("tests/data/multidex.apk").expect("apk");
+    assert!(buffers.len() >= 1);
+    let multi = MultiDex::from_buffers(&buffers).expect("multidex");
+    assert!(multi.dexes().len() >= 1);
 }

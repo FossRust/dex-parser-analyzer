@@ -1,13 +1,19 @@
 //! Helpers for coordinating multiple DEX files (e.g., multi-dex APKs).
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::{Cursor, Read, Seek},
+    path::Path,
+};
 
 use crate::{
     error::DexResult,
     format::{ClassIdx, MethodIdx, StringIdx, TypeIdx},
     model::{ClassHandle, DexFile, MethodHandle},
-    semantics,
+    parse_dex, semantics,
 };
+use zip::ZipArchive;
 
 /// Aggregated view spanning multiple `DexFile`s.
 pub struct MultiDex<'a> {
@@ -67,6 +73,16 @@ impl<'a> MultiDex<'a> {
         })
     }
 
+    /// Builds a `MultiDex` over the provided in-memory dex buffers.
+    /// The caller must keep each buffer alive for as long as the returned `MultiDex`.
+    pub fn from_buffers(buffers: &'a [Vec<u8>]) -> DexResult<Self> {
+        let mut dexes = Vec::with_capacity(buffers.len());
+        for buf in buffers {
+            dexes.push(parse_dex(buf)?);
+        }
+        Self::new(dexes)
+    }
+
     /// Returns the underlying dex files.
     pub fn dexes(&self) -> &[DexFile<'a>] {
         &self.dexes
@@ -95,4 +111,36 @@ impl<'a> MultiDex<'a> {
         let (dex_idx, type_idx) = self.type_index.get(descriptor)?;
         self.dexes[*dex_idx].type_descriptor(*type_idx)
     }
+}
+
+/// Reads all `classes*.dex` entries from a multi-dex APK/zip archive on disk.
+pub fn read_dex_buffers_from_apk<P: AsRef<Path>>(path: P) -> DexResult<Vec<Vec<u8>>> {
+    let file = File::open(path)?;
+    let mut archive = ZipArchive::new(file)?;
+    read_dex_entries(&mut archive)
+}
+
+/// Reads dex entries from an in-memory zip archive.
+pub fn read_dex_buffers_from_bytes(bytes: &[u8]) -> DexResult<Vec<Vec<u8>>> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor)?;
+    read_dex_entries(&mut archive)
+}
+
+fn read_dex_entries<R: Read + Seek>(archive: &mut ZipArchive<R>) -> DexResult<Vec<Vec<u8>>> {
+    let mut entries = Vec::new();
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let name = file.name().to_owned();
+        if !name.ends_with(".dex") {
+            continue;
+        }
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        if buf.starts_with(b"dex\n") {
+            entries.push((name, buf));
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries.into_iter().map(|(_, data)| data).collect())
 }

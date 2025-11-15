@@ -75,4 +75,10 @@ pub enum DexError {
     /// Any other parsing failure.
     #[error("{0}")]
     Message(&'static str),
+    /// I/O error while reading fixtures or archives.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    /// Zip archive error.
+    #[error("zip error: {0}")]
+    Zip(#[from] zip::result::ZipError),
 }
