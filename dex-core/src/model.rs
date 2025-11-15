@@ -87,21 +87,59 @@ impl<'a> DexFile<'a> {
     }
 
     /// Returns the parsed `map_list` entries.
+    ///
+    /// Each [`MapItem`](crate::format::MapItem) describes a contiguous region of
+    /// the file and is often used to discover optional tables such as call sites
+    /// or hidden API metadata. Use this alongside [`section_bytes`](Self::section_bytes)
+    /// to read raw sections that do not yet have high-level helpers.
+    ///
+    /// ```
+    /// # use dex_core::{parse_dex, DexError};
+    /// # fn dump_sections(data: &[u8]) -> Result<(), DexError> {
+    /// let dex = parse_dex(data)?;
+    /// for item in dex.map_items() {
+    ///     println!("type=0x{:04x} count={}", item.type_code, item.size);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn map_items(&self) -> &[MapItem] {
         &self.map_items
     }
 
     /// Returns the optional link data section, if present.
+    ///
+    /// Link data bundles odex/ART relocation metadata and is kept as a raw slice
+    /// so higher layers can deserialize toolchain-specific structures.
     pub fn link_data(&self) -> Option<&'a [u8]> {
         self.link_data
     }
 
     /// Returns the annotations directory for the given class.
+    ///
+    /// The resulting [`AnnotationsDirectoryItem`](crate::format::AnnotationsDirectoryItem)
+    /// contains offsets into the annotations section. Use those offsets with
+    /// [`section_bytes`](Self::section_bytes) to fetch the encoded values when
+    /// you want to interpret annotations yourself.
     pub fn annotations_directory(&self, idx: ClassIdx) -> Option<&AnnotationsDirectoryItem> {
         self.annotations.get(idx.to_usize())?.as_ref()
     }
 
     /// Returns a raw slice covering the section identified by the map type.
+    ///
+    /// This is useful for optional sections such as annotation sets or
+    /// vendor-specific payloads where `dex-core` intentionally stays hands-off.
+    /// The slice is derived from the original buffer and therefore inherits the
+    /// lifetime of `self`.
+    ///
+    /// ```
+    /// # use dex_core::format::MAP_TYPE_CLASS_DATA_ITEM;
+    /// # fn inspect_class_data(dex: &dex_core::DexFile<'_>) {
+    /// if let Some(bytes) = dex.section_bytes(MAP_TYPE_CLASS_DATA_ITEM) {
+    ///     println!("class_data section size: {}", bytes.len());
+    /// }
+    /// # }
+    /// ```
     pub fn section_bytes(&self, type_code: u16) -> Option<&'a [u8]> {
         let entry = self
             .map_items
@@ -123,6 +161,9 @@ impl<'a> DexFile<'a> {
     }
 
     /// Returns all strings as an iterator.
+    ///
+    /// The iterator lazily decodes each entry and therefore doubles as a
+    /// low-cost validation pass that ensures all strings can be materialized.
     pub fn strings(&'a self) -> Strings<'a> {
         Strings {
             dex: self,

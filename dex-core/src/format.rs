@@ -74,11 +74,15 @@ define_index!(CallSiteIdx);
 define_index!(MethodHandleIdx);
 
 /// Entry inside the `map_list` section.
+///
+/// Each entry provides the type code, size, and offset for a section present in
+/// the file. `dex-core` preserves the raw values so callers can recover optional
+/// sections without re-parsing the entire binary.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct MapItem {
-    /// Section type identifier.
+    /// Section type identifier (e.g. [`MAP_TYPE_CLASS_DEF_ITEM`]).
     pub type_code: u16,
-    /// Number of items present.
+    /// Number of items present in the section.
     pub size: u32,
     /// File offset for the first byte of the section.
     pub offset: u32,
@@ -199,56 +203,84 @@ bitflags::bitflags! {
 /// Entry inside the `class_defs` table.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ClassDef {
+    /// Index into [`TypeId`] describing the class.
     pub class_idx: TypeIdx,
+    /// Bitmask of [`AccessFlags`] applied to the class.
     pub access_flags: AccessFlags,
+    /// Optional reference to the super class descriptor.
     pub super_class_idx: Option<TypeIdx>,
+    /// Offset to the interface type list.
     pub interfaces_off: u32,
+    /// Optional index into `string_ids` for the source file.
     pub source_file_idx: Option<StringIdx>,
+    /// Offset to the annotations directory.
     pub annotations_off: u32,
+    /// Offset to the [`ClassDataItem`].
     pub class_data_off: u32,
+    /// Offset to initial static values (`encoded_array_item`).
     pub static_values_off: u32,
 }
 
 /// Representation of a `try_item`.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct TryItem {
+    /// Start program counter of the protected range.
     pub start_addr: u32,
+    /// Length in 16-bit code units of the protected range.
     pub insn_count: u16,
+    /// Offset (in bytes) from the start of the catch handler list.
     pub handler_off: u16,
 }
 
 /// Representation of a single typed catch handler.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct CatchHandler {
+    /// Type of the caught exception.
     pub type_idx: TypeIdx,
+    /// Handler entry program counter.
     pub addr: u32,
 }
 
 /// Representation of an encoded catch handler structure.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncodedCatchHandler {
+    /// List of typed handlers (ordered as encoded in the file).
     pub handlers: Vec<CatchHandler>,
+    /// Optional "catch all" target.
     pub catch_all_addr: Option<u32>,
 }
 
 /// Fully parsed `code_item`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CodeItem<'a> {
+    /// Total number of virtual registers used by this code.
     pub registers_size: u16,
+    /// Number of registers dedicated to incoming arguments.
     pub ins_size: u16,
+    /// Number of registers available to outgoing arguments.
     pub outs_size: u16,
+    /// Number of [`TryItem`] entries attached to this method.
     pub tries_size: u16,
+    /// Offset to associated debug info (`debug_info_item`).
     pub debug_info_off: u32,
+    /// Size of the instruction stream in 16-bit code units.
     pub insns_size: u32,
     /// Raw little-endian 16-bit code units (`insns` field).
     pub insns: &'a [u8],
+    /// Structured `try_item` entries for exception information.
     pub tries: Vec<TryItem>,
+    /// Parsed catch handlers referenced by [`TryItem::handler_off`].
     pub handlers: Vec<EncodedCatchHandler>,
+    /// Offsets used to resolve [`TryItem::handler_off`] into [`EncodedCatchHandler`] entries.
     pub handler_offsets: Vec<u32>,
 }
 
 impl<'a> CodeItem<'a> {
     /// Returns the catch handler associated with the given offset.
+    ///
+    /// The offset corresponds to a [`TryItem::handler_off`] and is used by the
+    /// CFG builder to add edges from protected regions to their exception
+    /// targets.
     pub fn handler_for_offset(&self, offset: u32) -> Option<&EncodedCatchHandler> {
         self.handler_offsets
             .iter()
@@ -260,53 +292,72 @@ impl<'a> CodeItem<'a> {
 /// Field entry inside a `class_data_item`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncodedField {
+    /// Index into the `field_ids` table.
     pub field_idx: FieldIdx,
+    /// Associated access flags.
     pub access_flags: AccessFlags,
 }
 
 /// Method entry inside a `class_data_item`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncodedMethod {
+    /// Index into the `method_ids` table.
     pub method_idx: MethodIdx,
+    /// Associated access flags.
     pub access_flags: AccessFlags,
+    /// Offset to the [`CodeItem`] (if any).
     pub code_off: u32,
 }
 
 /// Parsed `class_data_item`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassDataItem {
+    /// Static field records sorted by index difference.
     pub static_fields: Vec<EncodedField>,
+    /// Instance field records sorted by index difference.
     pub instance_fields: Vec<EncodedField>,
+    /// Direct (private + constructors) method records.
     pub direct_methods: Vec<EncodedMethod>,
+    /// Virtual method records.
     pub virtual_methods: Vec<EncodedMethod>,
 }
 
 /// Parsed `annotations_directory_item` contents.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnnotationsDirectoryItem {
+    /// Offset to the class annotation set.
     pub class_annotations_off: Option<u32>,
+    /// Field annotations keyed by [`FieldIdx`].
     pub field_annotations: Vec<FieldAnnotation>,
+    /// Method annotations keyed by [`MethodIdx`].
     pub method_annotations: Vec<MethodAnnotation>,
+    /// Parameter annotations keyed by [`MethodIdx`].
     pub parameter_annotations: Vec<ParameterAnnotation>,
 }
 
 /// Field-level annotation metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FieldAnnotation {
+    /// Index of the annotated field.
     pub field_idx: FieldIdx,
+    /// Offset to the annotation set.
     pub annotations_offset: u32,
 }
 
 /// Method-level annotation metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MethodAnnotation {
+    /// Index of the annotated method.
     pub method_idx: MethodIdx,
+    /// Offset to the annotation set.
     pub annotations_offset: u32,
 }
 
 /// Parameter-level annotation metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParameterAnnotation {
+    /// Index of the annotated method.
     pub method_idx: MethodIdx,
+    /// Offset to the parameter annotation list.
     pub annotations_offset: u32,
 }

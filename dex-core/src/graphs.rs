@@ -13,10 +13,12 @@ use crate::{
     model::DexFile,
 };
 
-/// Basic block metadata.
+/// Basic block metadata used by the CFG.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BasicBlock {
+    /// Program counter (in 16-bit code units) where the block starts.
     pub start_pc: u32,
+    /// Program counter where the block ends (exclusive).
     pub end_pc: u32,
 }
 
@@ -26,14 +28,31 @@ pub type Cfg = Graph<BasicBlock, ()>;
 /// Alias for the call graph type.
 pub type CallGraph = Graph<u32, ()>;
 
-/// Cross-reference container.
+/// Cross-reference container that records simple relationships.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Xrefs {
+    /// `(caller, callee)` pairs expressed as raw method indexes.
     pub method_calls: Vec<(u32, u32)>,
+    /// `(method, string)` pairs expressing string usages.
     pub method_strings: Vec<(u32, u32)>,
 }
 
-/// Build a naive CFG for the given method (single basic block fallback).
+/// Build a CFG for the given method (single basic block fallback).
+///
+/// The current implementation groups the entire method into a single basic
+/// block but augments it with edges pointing to exception handler entry
+/// points. This keeps exception-aware traversal possible even before the full
+/// basic-block splitting logic lands.
+///
+/// ```
+/// # use dex_core::{graphs, parse_dex};
+/// # fn cfg_for_first_method(data: &[u8]) -> Result<(), dex_core::DexError> {
+/// let dex = parse_dex(data)?;
+/// let cfg = graphs::build_method_cfg(&dex, dex_core::format::MethodIdx::new(0))?;
+/// println!("CFG nodes: {}", cfg.node_count());
+/// # Ok(())
+/// # }
+/// ```
 pub fn build_method_cfg(dex: &DexFile<'_>, method: MethodIdx) -> DexResult<Cfg> {
     let mut graph = Graph::new();
     let instructions = dex.decode_instructions(method)?;
@@ -79,6 +98,9 @@ pub fn build_method_cfg(dex: &DexFile<'_>, method: MethodIdx) -> DexResult<Cfg> 
 }
 
 /// Converts a CFG into a DTO representation.
+///
+/// The DTO mirrors the structure expected by `dex-gui` and higher-layer
+/// serializers. Node indexes are re-numbered densely to make transport smaller.
 pub fn cfg_to_dto(cfg: &Cfg) -> DtoCfg {
     let mut blocks = Vec::new();
     for (idx, node) in cfg.node_indices().enumerate() {
@@ -100,6 +122,9 @@ pub fn cfg_to_dto(cfg: &Cfg) -> DtoCfg {
 }
 
 /// Build a whole-program call graph.
+///
+/// The call graph treats each `invoke-*` instruction as a direct edge between
+/// the declaring method and the referenced target index.
 pub fn build_call_graph(dex: &DexFile<'_>) -> DexResult<CallGraph> {
     let mut graph = Graph::new();
     let mut nodes = Vec::new();
@@ -126,6 +151,10 @@ pub fn build_call_graph(dex: &DexFile<'_>) -> DexResult<CallGraph> {
 }
 
 /// Build simplified cross-reference data.
+///
+/// Returns the `(caller, callee)` pairs for all invocations found in the file
+/// plus `(method, string)` pairs enumerating literal string references. Higher
+/// layers can materialize richer databases on top of these seeds.
 pub fn build_xrefs(dex: &DexFile<'_>) -> DexResult<Xrefs> {
     let mut xrefs = Xrefs::default();
     for idx in 0..dex.method_count() {

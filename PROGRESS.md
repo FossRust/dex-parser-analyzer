@@ -12,9 +12,10 @@
 - Added fuzz/property tests: leb128 round-trips, handler offset validation, comprehensive string/type iteration, and malformed fixture tests (bad magic, out-of-bounds sections, corrupt payloads) to harden the parser against invalid inputs.
 - Implemented ART/odex extensions: Format20bc instructions now record verification metadata, quickened opcodes (35mi/35ms/3rmi/3rms) capture inline/vtable indices, DTOs expose the new fields, and tests cover these cases.
 - Added multi-dex unpacking helpers based on the `zip` crate (`read_dex_buffers_from_apk`/`from_buffers`) and tests that unpack the bundled `multidex.apk` fixture.
+- Expanded Rustdoc coverage for map/annotation helpers, semantic utilities, graphs (CFG/call-graph/xrefs), DTOs, and section accessor APIs so downstream users have examples for every public entry point.
 
 ## Next Steps
 1. Build additional fixtures/property tests to stress map/annotation parsing, graph builders, and bytecode decoding beyond the current synthetic samples (e.g., multi-dex APK unpacking).
-2. Document public APIs (README + Rustdoc examples) and add CI scripts (fmt/clippy/test) for `dex-core`.
+2. Wire up CI scripts (fmt/clippy/test) and extend the top-level README with usage examples for `dex-core`.
 3. Expose serde DTOs for graphs/xrefs to higher layers (`dex-analysis`, `dex-gui`) and prototype data flow integrations.
 4. Plan multi-dex coordination utilities (parsing multiple `classes*.dex` buffers and linking cross-dex references).
