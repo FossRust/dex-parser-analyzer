@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     bytecode::Instruction,
     error::DexResult,
-    model::{ClassHandle, MethodHandle},
+    model::{ClassHandle, DexFile, MethodHandle},
 };
 
 /// Transfer representation of a method.
@@ -26,6 +26,38 @@ pub struct DtoClass {
     pub idx: u32,
     /// Descriptor string.
     pub descriptor: String,
+}
+
+/// Summary of a single class for UI consumption.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DexClassSummaryDto {
+    /// Class descriptor (`Lpkg/Foo;`).
+    pub descriptor: String,
+    /// Number of encoded methods for the class.
+    pub method_count: u32,
+}
+
+/// Lightweight overview aggregating header + class info.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DexOverviewDto {
+    /// Dex version string (e.g. `39`).
+    pub version: String,
+    /// Adler32 checksum stored in the header.
+    pub checksum: u32,
+    /// Total on-disk size.
+    pub file_size: u32,
+    /// `string_ids` entry count.
+    pub string_count: u32,
+    /// `type_ids` entry count.
+    pub type_count: u32,
+    /// `field_ids` entry count.
+    pub field_count: u32,
+    /// `method_ids` entry count.
+    pub method_count: u32,
+    /// `class_defs` entry count.
+    pub class_count: u32,
+    /// Collected class summaries.
+    pub classes: Vec<DexClassSummaryDto>,
 }
 
 /// Transfer representation of instructions.
@@ -184,4 +216,33 @@ pub fn instructions_to_dto(instructions: &[Instruction]) -> Vec<DtoInstruction> 
             }
         })
         .collect()
+}
+
+/// Convert a parsed [`DexFile`] into a serializable overview.
+pub fn dex_to_overview(dex: &DexFile<'_>) -> DexResult<DexOverviewDto> {
+    let header = dex.header();
+    let mut classes = Vec::with_capacity(header.class_defs_size as usize);
+    for class in dex.classes() {
+        let descriptor = class.descriptor()?.to_string();
+        let method_count = class
+            .methods()
+            .map(|methods| methods.len() as u32)
+            .unwrap_or(0);
+        classes.push(DexClassSummaryDto {
+            descriptor,
+            method_count,
+        });
+    }
+
+    Ok(DexOverviewDto {
+        version: header.version.to_string(),
+        checksum: header.checksum,
+        file_size: header.file_size,
+        string_count: header.string_ids_size,
+        type_count: header.type_ids_size,
+        field_count: header.field_ids_size,
+        method_count: header.method_ids_size,
+        class_count: header.class_defs_size,
+        classes,
+    })
 }
