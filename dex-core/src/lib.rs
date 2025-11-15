@@ -9,6 +9,7 @@ pub mod dto;
 pub mod format;
 pub mod graphs;
 pub mod model;
+pub mod multidex;
 pub mod parser;
 pub mod semantics;
 

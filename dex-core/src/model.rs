@@ -149,6 +149,11 @@ impl<'a> DexFile<'a> {
         Ok(string_ref.as_str())
     }
 
+    /// Total number of strings in this dex.
+    pub fn string_count(&self) -> usize {
+        self.string_ids.len()
+    }
+
     fn decode_string(&self, idx: StringIdx) -> DexResult<String> {
         let id = self
             .string_ids
