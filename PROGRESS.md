@@ -9,7 +9,7 @@
 - Extended CFG builder to add nodes/edges for exception handlers, and `CodeItem` now exposes handler lookup metadata for try/catch blocks.
 - Added a “fixture sweep” test suite that parses/decode bytecode across the provided Androguard `.dex` corpus to catch regressions against real-world files.
 - Introduced `multidex::MultiDex`, an aggregator that builds shared string/type/class/method indexes across several `DexFile`s, plus tests that prove cross-dex lookups work using bundled fixtures.
-- Added fuzz-style regression tests that iterate strings, types, methods, and handler maps across all fixtures to ensure lookups and bytecode decoding never panic.
+- Added fuzz/property tests: leb128 round-trips, handler offset validation, comprehensive string/type iteration, and malformed fixture tests (bad magic, out-of-bounds sections, corrupt payloads) to harden the parser against invalid inputs.
 
 ## Next Steps
 1. Build additional fixtures/property tests to stress map/annotation parsing, graph builders, and bytecode decoding beyond the current synthetic samples (e.g., multi-dex APK unpacking).

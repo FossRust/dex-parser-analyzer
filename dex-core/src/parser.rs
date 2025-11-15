@@ -660,3 +660,73 @@ fn parse_annotations_directory(bytes: &[u8], offset: u32) -> DexResult<Annotatio
         parameter_annotations,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{read_sleb128, read_uleb128};
+
+    fn encode_uleb(value: u32) -> Vec<u8> {
+        let mut remaining = value;
+        let mut encoded = Vec::new();
+        loop {
+            let mut byte = (remaining & 0x7F) as u8;
+            remaining >>= 7;
+            if remaining != 0 {
+                byte |= 0x80;
+            }
+            encoded.push(byte);
+            if remaining == 0 {
+                break;
+            }
+        }
+        encoded
+    }
+
+    fn encode_sleb(value: i32) -> Vec<u8> {
+        let mut remaining = value as i64;
+        let mut encoded = Vec::new();
+        loop {
+            let byte = (remaining & 0x7F) as u8;
+            remaining >>= 7;
+            let done =
+                (remaining == 0 && (byte & 0x40) == 0) || (remaining == -1 && (byte & 0x40) != 0);
+            encoded.push(if done { byte } else { byte | 0x80 });
+            if done {
+                break;
+            }
+        }
+        encoded
+    }
+
+    #[test]
+    fn leb128_round_trip() {
+        let values = [0u32, 1, 0x7F, 0x80, 0x1234, 0xFFFF, 0x1FFFFF, u32::MAX / 2];
+        for value in values {
+            let bytes = encode_uleb(value);
+            let (decoded, used) = read_uleb128(&bytes, "test").expect("decode");
+            assert_eq!(decoded, value);
+            assert_eq!(used, bytes.len());
+        }
+    }
+
+    #[test]
+    fn sleb128_round_trip() {
+        let values = [
+            0i32,
+            -1,
+            1,
+            -64,
+            64,
+            -12345,
+            12345,
+            i32::MAX >> 1,
+            i32::MIN >> 1,
+        ];
+        for value in values {
+            let bytes = encode_sleb(value);
+            let (decoded, used) = read_sleb128(&bytes, "test").expect("decode");
+            assert_eq!(decoded, value);
+            assert_eq!(used, bytes.len());
+        }
+    }
+}

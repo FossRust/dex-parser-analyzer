@@ -768,6 +768,21 @@ mod tests {
             Some(RangeInfo { start, count }) if start == 0x20 && count == 2
         ));
     }
+
+    #[test]
+    fn invalid_fill_array_payload_offset_errors() {
+        // fill-array-data with offset pointing beyond insns_size.
+        static BYTES: [u8; 10] = [0x26, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00];
+        let code = code_item_from_bytes(&BYTES);
+        let err = super::decode_stream(&code).expect_err("expected malformed");
+        assert!(matches!(
+            err,
+            DexError::Malformed {
+                context: "payload",
+                ..
+            }
+        ));
+    }
 }
 
 fn decode_reference(kind: ReferenceType, index: u32) -> Option<Reference> {
