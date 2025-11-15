@@ -5,7 +5,6 @@
 //! `dex-parser-analyzer` workspace. Higher-level analyzers live in the sibling
 //! `dex-analysis` crate.
 
-pub mod analysis;
 pub mod bytecode;
 pub mod dto;
 pub mod format;

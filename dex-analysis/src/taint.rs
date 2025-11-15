@@ -1,7 +1,6 @@
 use std::{cell::RefCell, collections::HashMap};
 
 use dex_core::{
-    analysis::data_flow::{self, AnalysisContext, ForwardAnalysis},
     bytecode::{Instruction, Reference},
     format::MethodIdx,
     model::DexFile,
@@ -10,6 +9,7 @@ use serde_json::json;
 
 use crate::{
     config::AnalysisConfig,
+    data_flow::{self, AnalysisContext, ForwardAnalysis},
     model::{describe_method, Finding, Location, Severity, VulnerabilityKind},
 };
 

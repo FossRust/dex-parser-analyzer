@@ -8,6 +8,7 @@
 //! exposes a WASM-friendly API for GUI or cloud runtimes.
 
 pub mod config;
+pub mod data_flow;
 pub mod engine;
 pub mod error;
 pub mod ffi;
@@ -17,6 +18,7 @@ pub mod structural;
 pub mod taint;
 
 pub use config::AnalysisConfig;
+pub use data_flow::{AnalysisContext, DataFlowResult, ForwardAnalysis};
 pub use engine::{analyze_dex, analyze_dex_bytes};
 pub use error::AnalysisError;
 pub use model::{AnalysisReport, AnalysisStats, Finding, Location, Severity, VulnerabilityKind};

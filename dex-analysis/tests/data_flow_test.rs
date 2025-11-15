@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
+use dex_analysis::data_flow::{self, AnalysisContext, ForwardAnalysis};
 use dex_core::{
-    analysis::data_flow::{self, AnalysisContext, ForwardAnalysis},
     bytecode::{Instruction, InstructionFormat},
     format::MethodIdx,
     graphs, parse_dex,

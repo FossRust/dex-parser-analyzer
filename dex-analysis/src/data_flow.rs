@@ -1,21 +1,15 @@
-//! Prototype data-flow engine that operates on CFGs emitted by `graphs`.
-//!
-//! The engine is intentionally small: it provides a worklist-driven forward
-//! solver plus a trait (`ForwardAnalysis`) that downstream crates (`dex-analysis`,
-//! GUI overlays) can implement to express concrete analyses without re-building
-//! the plumbing each time.
+//! Worklist-based forward data-flow engine backed by `dex-core` CFGs.
 
 use std::collections::{HashMap, VecDeque};
 
-use petgraph::{Direction, graph::NodeIndex, visit::NodeIndexable};
-
-use crate::{
-    DexResult,
+use dex_core::{
     bytecode::Instruction,
     format::MethodIdx,
     graphs::{self, BasicBlock, Cfg},
     model::DexFile,
+    DexResult,
 };
+use petgraph::{graph::NodeIndex, visit::NodeIndexable, Direction};
 
 /// Shared context passed to [`ForwardAnalysis`] callbacks.
 #[derive(Clone, Copy)]
@@ -55,7 +49,6 @@ impl<S> DataFlowResult<S> {
             .and_then(|state| state.as_ref())
     }
 
-    /// Internal ctor used by the solver.
     fn new(entry_states: Vec<Option<S>>, exit_states: Vec<Option<S>>) -> Self {
         Self {
             entry_states,
