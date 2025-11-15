@@ -42,3 +42,34 @@ fn unpack_multidex_apk() {
     let multi = MultiDex::from_buffers(&buffers).expect("multidex");
     assert!(multi.dexes().len() >= 1);
 }
+
+#[test]
+fn duplicated_descriptors_surface_multiple_locations() {
+    let bytes_a = load("tests/data/Test.dex");
+    let bytes_b = load("tests/data/Test.dex");
+    let dex_a = parse_dex(&bytes_a).expect("dex A");
+    let dex_b = parse_dex(&bytes_b).expect("dex B");
+    let multi = MultiDex::new(vec![dex_a, dex_b]).expect("multi");
+
+    let descriptor = "LTest;";
+    let class_entries = multi.class_entries(descriptor);
+    let class_count = class_entries.len();
+    assert_eq!(class_count, 2, "expected two class entries");
+    let classes = multi.find_classes(descriptor);
+    assert_eq!(classes.len(), class_count);
+    assert!(
+        multi.find_class(descriptor).is_some(),
+        "lookup should succeed"
+    );
+
+    let methods = multi.find_methods("LTest;->aTestMethod(I)I");
+    assert_eq!(methods.len(), 2);
+
+    let string_pool: Vec<_> = multi.string_pool().collect();
+    assert!(
+        string_pool
+            .iter()
+            .any(|(value, entries)| { *value == "Test.java" && entries.len() == 2 }),
+        "string pool should record both occurrences of Test.java"
+    );
+}
