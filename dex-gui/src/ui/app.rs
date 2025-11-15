@@ -9,13 +9,7 @@ use gloo_file::{futures::read_as_bytes, File as GlooFile};
 use leptos::*;
 use web_sys::HtmlInputElement;
 
-use super::{AnalysisView, DexView, Tabs};
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum Tab {
-    Dex,
-    Analysis,
-}
+use super::{AnalysisView, DexView};
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -24,7 +18,6 @@ pub fn App() -> impl IntoView {
     let (selected_file, set_selected_file) = create_signal(Option::<GlooFile>::None);
     let (selected_file_name, set_selected_file_name) = create_signal(String::new());
 
-    let (active_tab, set_active_tab) = create_signal(Tab::Dex);
     let (dex_overview, set_dex_overview) = create_signal(Option::<Rc<DexOverviewDto>>::None);
     let (analysis_report, set_analysis_report) = create_signal(Option::<Rc<AnalysisReport>>::None);
 
@@ -96,66 +89,93 @@ pub fn App() -> impl IntoView {
 
                 set_dex_overview.set(Some(Rc::new(overview)));
                 set_analysis_report.set(Some(Rc::new(report)));
-                set_active_tab.set(Tab::Dex);
                 set_loading.set(false);
             });
         }
     };
 
     view! {
-        <div class="app-root">
-            <header class="app-header">
-                <h1>"Dex Analyzer"</h1>
-                <div class="loader-row">
-                    <input
-                        class="file-input"
-                        type="file"
-                        accept=".dex"
-                        disabled=move || loading.get()
-                        on:change=on_file_change
-                    />
-                    <div class="file-meta">
+        <div class="bg-light min-vh-100 d-flex flex-column">
+            <header class="bg-dark text-white py-4">
+                <div class="container">
+                    <h1 class="h3 mb-3">"Dex Analyzer"</h1>
+                    <div class="row g-3 align-items-center">
+                        <div class="col-md-6">
+                            <input
+                                class="form-control"
+                                type="file"
+                                accept=".dex"
+                                disabled=move || loading.get()
+                                on:change=on_file_change
+                            />
+                        </div>
+                        <div class="col-md-4">
+                            <div class="text-light-emphasis small">
+                                { move || {
+                                    let name = selected_file_name.get();
+                                    if name.is_empty() {
+                                        view! { <span>"No file selected"</span> }.into_view()
+                                    } else {
+                                        view! { <span>{name}</span> }.into_view()
+                                    }
+                                }}
+                            </div>
+                        </div>
+                        <div class="col-md-2 text-md-end">
+                            <button
+                                class="btn btn-warning w-100"
+                                disabled=move || loading.get()
+                                on:click=on_load
+                            >
+                                { move || if loading.get() { "Loading…" } else { "Load" } }
+                            </button>
+                        </div>
+                    </div>
+                    { move || error.get().map(|msg| view! { <div class="alert alert-danger mt-3 mb-0" role="alert">{msg}</div> }) }
+                </div>
+            </header>
+
+            <main class="container my-4 flex-grow-1">
+                <div class="card shadow-sm mb-4">
+                    <div class="card-body">
                         { move || {
-                            let name = selected_file_name.get();
-                            if name.is_empty() {
-                                view! { <span>"No file selected"</span> }.into_view()
-                            } else {
-                                view! { <span>{name}</span> }.into_view()
+                            if loading.get() {
+                                return view! { <div class="text-secondary">"Loading…"</div> }.into_view();
+                            }
+
+                            match (dex_overview.get(), analysis_report.get()) {
+                                (Some(dex), Some(report)) => view! {
+                                    <div class="vstack gap-4">
+                                        <section>
+                                            <h2 class="h4 mb-3">"Dex Overview"</h2>
+                                            <DexView dex=dex.clone()/>
+                                        </section>
+                                        <section>
+                                            <h2 class="h4 mb-3">"Analysis Report"</h2>
+                                            <AnalysisView report=report.clone()/>
+                                        </section>
+                                    </div>
+                                }.into_view(),
+                                (Some(dex), None) => view! {
+                                    <section>
+                                        <h2 class="h4 mb-3">"Dex Overview"</h2>
+                                        <DexView dex=dex.clone()/>
+                                    </section>
+                                }.into_view(),
+                                (None, Some(report)) => view! {
+                                    <section>
+                                        <h2 class="h4 mb-3">"Analysis Report"</h2>
+                                        <AnalysisView report=report.clone()/>
+                                    </section>
+                                }.into_view(),
+                                _ => view! {
+                                    <div class="text-secondary">
+                                        "Select a local .dex file above and click Load to begin."
+                                    </div>
+                                }.into_view(),
                             }
                         }}
                     </div>
-                    <button
-                        class="load-button"
-                        disabled=move || loading.get()
-                        on:click=on_load
-                    >
-                        { move || if loading.get() { "Loading…" } else { "Load" } }
-                    </button>
-                </div>
-                { move || error.get().map(|msg| view! { <div class="error-banner">{msg}</div> }) }
-            </header>
-
-            <main class="app-main">
-                <Tabs active_tab set_active_tab/>
-                <div class="tab-content">
-                    { move || {
-                        if loading.get() {
-                            return view! { <div class="placeholder">"Loading…"</div> }.into_view();
-                        }
-
-                        match (dex_overview.get(), analysis_report.get(), active_tab.get()) {
-                            (Some(dex), _, Tab::Dex) => view! { <DexView dex/> }.into_view(),
-                            (_, Some(report), Tab::Analysis) => {
-                                view! { <AnalysisView report/> }.into_view()
-                            }
-                            _ => view! {
-                                <div class="placeholder">
-                                    "Select a local .dex file above and click Load to begin."
-                                </div>
-                            }
-                            .into_view(),
-                        }
-                    }}
                 </div>
                 <DocumentationSection/>
             </main>
@@ -176,7 +196,6 @@ fn print_classes(bytes: &[u8]) -> Result<(), DexError> {
 }"#;
 
 const DEX_ANALYSIS_SNIPPET: &str = r#"use dex_analysis::{config::AnalysisConfig, engine::analyze_dex};
-use dex_core::parse_dex;
 
 fn run_analysis(bytes: &[u8]) -> anyhow::Result<()> {
     let dex = parse_dex(bytes)?;
@@ -189,25 +208,34 @@ fn run_analysis(bytes: &[u8]) -> anyhow::Result<()> {
 
 const DEX_CLI_SNIPPET: &str = r#"cargo run -p dex-cli -- path/to/classes.dex --max-findings 25"#;
 
+const PRIVACY_NOTE: &str = "The dex-gui app executes entirely in your browser via Rust compiled to WebAssembly, so uploaded .dex files never leave your machine. Prefer server-side processing? Compile the same WASM and host it with Extism (or any runtime) to call it from Rust or other languages.";
+
 #[component]
 fn DocumentationSection() -> impl IntoView {
     view! {
-        <section class="docs-section">
-            <h2>"Sample Usage"</h2>
-            <div class="docs-grid">
-                <article>
-                    <h3>"dex-core"</h3>
-                    <pre><code>{DEX_CORE_SNIPPET}</code></pre>
-                </article>
-                <article>
-                    <h3>"dex-analysis"</h3>
-                    <pre><code>{DEX_ANALYSIS_SNIPPET}</code></pre>
-                </article>
-                <article>
-                    <h3>"dex-cli"</h3>
-                    <pre><code>{DEX_CLI_SNIPPET}</code></pre>
-                </article>
+        <>
+            <div class="alert alert-info mb-3" role="alert">
+                {PRIVACY_NOTE}
             </div>
-        </section>
+            <section class="card shadow-sm">
+                <div class="card-body">
+                    <h2 class="h4 mb-3">"Sample Usage"</h2>
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <h3 class="h6">"dex-core"</h3>
+                            <pre class="bg-dark text-light p-3 rounded small" style="white-space: pre-wrap;"><code class="language-rust">{DEX_CORE_SNIPPET}</code></pre>
+                        </div>
+                        <div class="col-md-4">
+                            <h3 class="h6">"dex-analysis"</h3>
+                            <pre class="bg-dark text-light p-3 rounded small" style="white-space: pre-wrap;"><code class="language-rust">{DEX_ANALYSIS_SNIPPET}</code></pre>
+                        </div>
+                        <div class="col-md-4">
+                            <h3 class="h6">"dex-cli"</h3>
+                            <pre class="bg-dark text-light p-3 rounded small" style="white-space: pre-wrap;"><code class="language-bash">{DEX_CLI_SNIPPET}</code></pre>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </>
     }
 }

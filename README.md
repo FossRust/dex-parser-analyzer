@@ -47,3 +47,5 @@ fn run_analysis(bytes: &[u8]) -> anyhow::Result<()> {
 ```bash
 cargo run -p dex-cli -- path/to/classes.dex --max-findings 25
 ```
+
+> Privacy note: the `dex-gui` web app runs completely inside your browser via Rust-to-WASM, so the uploaded `.dex` never leaves your machine. Prefer server-side automation? Compile the same logic to a WebAssembly module and host it behind [Extism](https://extism.org/) (or any WASM runtime) to call it from Rust or other languages.

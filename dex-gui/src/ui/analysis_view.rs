@@ -38,19 +38,43 @@ pub fn AnalysisView(report: Rc<AnalysisReport>) -> impl IntoView {
     };
 
     view! {
-        <div class="analysis-view">
-            <section class="analysis-summary">
-                <h2>"Analysis Summary"</h2>
-                <div class="summary-grid">
-                    <div>"Findings: " {report.findings.len()}</div>
-                    <div>"Methods: " {report.stats.method_count}</div>
-                    <div>"Strings: " {report.stats.string_count}</div>
-                    <div>"Instructions: " {report.stats.instruction_count}</div>
+        <div class="vstack gap-4">
+            <section>
+                <div class="row row-cols-2 row-cols-md-3 g-3">
+                    <div class="col">
+                        <div class="border rounded p-3 bg-light">
+                            <div class="text-secondary text-uppercase small">"Findings"</div>
+                            <div class="fw-semibold">{report.findings.len()}</div>
+                        </div>
+                    </div>
+                    <div class="col">
+                        <div class="border rounded p-3 bg-light">
+                            <div class="text-secondary text-uppercase small">"Methods"</div>
+                            <div class="fw-semibold">{report.stats.method_count}</div>
+                        </div>
+                    </div>
+                    <div class="col">
+                        <div class="border rounded p-3 bg-light">
+                            <div class="text-secondary text-uppercase small">"Strings"</div>
+                            <div class="fw-semibold">{report.stats.string_count}</div>
+                        </div>
+                    </div>
+                    <div class="col">
+                        <div class="border rounded p-3 bg-light">
+                            <div class="text-secondary text-uppercase small">"Instructions"</div>
+                            <div class="fw-semibold">{report.stats.instruction_count}</div>
+                        </div>
+                    </div>
                     {report.stats.elapsed_ms.map(|elapsed| view! {
-                        <div>"Elapsed (ms): " {elapsed}</div>
+                        <div class="col">
+                            <div class="border rounded p-3 bg-light">
+                                <div class="text-secondary text-uppercase small">"Elapsed"</div>
+                                <div class="fw-semibold">{elapsed} " ms"</div>
+                            </div>
+                        </div>
                     })}
                 </div>
-                <div class="severity-filters" style="margin-top:0.75rem;">
+                <div class="mt-3 d-flex flex-wrap gap-2">
                     { SEVERITY_ORDER.iter().map(|severity| {
                         let label = format!("{severity:?}");
                         let sev = *severity;
@@ -58,9 +82,9 @@ pub fn AnalysisView(report: Rc<AnalysisReport>) -> impl IntoView {
                             <button
                                 class=move || {
                                     if active_severities.get().contains(&sev) {
-                                        "severity-btn active"
+                                        "btn btn-primary btn-sm"
                                     } else {
-                                        "severity-btn"
+                                        "btn btn-outline-primary btn-sm"
                                     }
                                 }
                                 on:click=move |_| toggle(sev)
@@ -72,55 +96,59 @@ pub fn AnalysisView(report: Rc<AnalysisReport>) -> impl IntoView {
                 </div>
             </section>
 
-            <section class="analysis-findings">
-                <h2>"Findings"</h2>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>"Severity"</th>
-                            <th>"Rule"</th>
-                            <th>"Location"</th>
-                            <th>"Message"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        { move || {
-                            let rows = filtered_findings();
-                            if rows.is_empty() {
-                                return view! {
-                                    <tr>
-                                        <td colspan="4">"No findings with the selected severities."</td>
-                                    </tr>
-                                }.into_view();
-                            }
-                            rows.into_iter().map(|finding| {
-                                let severity = format!("{:?}", finding.severity);
-                                let rule = finding.id.to_string();
-                                let location = format!(
-                                    "{}::{}",
-                                    finding.location.class_descriptor, finding.location.method_name
-                                );
-                                let message = finding.message.clone();
-                                let row_finding = finding.clone();
-                                view! {
-                                    <tr on:click=move |_| set_selected.set(Some(row_finding.clone()))>
-                                        <td>{severity}</td>
-                                        <td>{rule}</td>
-                                        <td>{location}</td>
-                                        <td>{message}</td>
-                                    </tr>
+            <section>
+                <h3 class="h5 mb-3">"Findings"</h3>
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th scope="col">"Severity"</th>
+                                <th scope="col">"Rule"</th>
+                                <th scope="col">"Location"</th>
+                                <th scope="col">"Message"</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            { move || {
+                                let rows = filtered_findings();
+                                if rows.is_empty() {
+                                    return view! {
+                                        <tr>
+                                            <td colspan="4" class="text-secondary">
+                                                "No findings with the selected severities."
+                                            </td>
+                                        </tr>
+                                    }.into_view();
                                 }
-                            }).collect_view()
-                        }}
-                    </tbody>
-                </table>
+                                rows.into_iter().map(|finding| {
+                                    let severity = format!("{:?}", finding.severity);
+                                    let rule = finding.id.to_string();
+                                    let location = format!(
+                                        "{}::{}",
+                                        finding.location.class_descriptor, finding.location.method_name
+                                    );
+                                    let message = finding.message.clone();
+                                    let row_finding = finding.clone();
+                                    view! {
+                                        <tr on:click=move |_| set_selected.set(Some(row_finding.clone())) style="cursor:pointer;">
+                                            <td>{severity}</td>
+                                            <td class="text-nowrap">{rule}</td>
+                                            <td class="font-monospace">{location}</td>
+                                            <td>{message}</td>
+                                        </tr>
+                                    }
+                                }).collect_view()
+                            }}
+                        </tbody>
+                    </table>
+                </div>
             </section>
 
             { move || selected.get().map(|finding| {
                 view! {
-                    <section class="analysis-details">
-                        <h3>"Finding Details"</h3>
-                        <pre>{format!("{finding:#?}")}</pre>
+                    <section>
+                        <h3 class="h6">"Finding Details"</h3>
+                        <pre class="bg-dark text-light p-3 rounded" style="white-space: pre-wrap;">{format!("{finding:#?}")}</pre>
                     </section>
                 }
             }) }

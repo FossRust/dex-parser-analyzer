@@ -24,52 +24,76 @@ pub fn DexView(dex: Rc<DexOverviewDto>) -> impl IntoView {
             .collect::<Vec<_>>()
     };
 
+    let summary = vec![
+        ("Version", overview.version.clone()),
+        ("File size", format!("{} bytes", overview.file_size)),
+        ("Checksum", overview.checksum.to_string()),
+        ("Strings", overview.string_count.to_string()),
+        ("Types", overview.type_count.to_string()),
+        ("Fields", overview.field_count.to_string()),
+        ("Methods", overview.method_count.to_string()),
+        ("Classes", overview.class_count.to_string()),
+    ];
+
     view! {
-        <div class="dex-view">
-            <section class="dex-summary">
-                <h2>"Dex Summary"</h2>
-                <div class="summary-grid">
-                    <div>"Version: " {overview.version.clone()}</div>
-                    <div>"File size: " {overview.file_size}</div>
-                    <div>"Checksum: " {overview.checksum}</div>
-                    <div>"Strings: " {overview.string_count}</div>
-                    <div>"Types: " {overview.type_count}</div>
-                    <div>"Fields: " {overview.field_count}</div>
-                    <div>"Methods: " {overview.method_count}</div>
-                    <div>"Classes: " {overview.class_count}</div>
+        <div class="vstack gap-4">
+            <section>
+                <div class="row row-cols-2 row-cols-md-4 g-3">
+                    { summary.into_iter().map(|(label, value)| {
+                        view! {
+                            <div class="col">
+                                <div class="border rounded p-3 bg-light">
+                                    <div class="text-secondary text-uppercase small">{label}</div>
+                                    <div class="fw-semibold">{value}</div>
+                                </div>
+                            </div>
+                        }
+                    }).collect_view() }
                 </div>
             </section>
 
-            <section class="dex-classes">
-                <div class="classes-header" style="display:flex;justify-content:space-between;align-items:center;gap:0.75rem;">
-                    <h2 style="margin:0;">"Classes"</h2>
+            <section>
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                    <h3 class="h5 mb-0">"Classes"</h3>
                     <input
+                        class="form-control"
+                        style="max-width: 280px;"
                         type="text"
                         placeholder="Filter by descriptor…"
                         prop:value=move || filter.get()
                         on:input=move |ev| set_filter.set(event_target_value(&ev))
                     />
                 </div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>"Class"</th>
-                            <th>"Methods"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        { move || {
-                            filtered_classes().into_iter().map(|(descriptor, methods)| {
-                                view! {
-                                    <tr>
-                                        <td>{descriptor}</td>
-                                        <td>{methods}</td>
-                                    </tr>
+                <div class="table-responsive">
+                    <table class="table table-sm table-striped align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th scope="col">"Class"</th>
+                                <th scope="col">"Methods"</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            { move || {
+                                let rows = filtered_classes();
+                                if rows.is_empty() {
+                                    return view! {
+                                        <tr>
+                                            <td colspan="2" class="text-secondary">"No classes match the filter."</td>
+                                        </tr>
+                                    }.into_view();
                                 }
-                            }).collect_view()
-                        }}
-                    </tbody>
-                </table>
+                                rows.into_iter().map(|(descriptor, methods)| {
+                                    view! {
+                                        <tr>
+                                            <td class="font-monospace">{descriptor}</td>
+                                            <td>{methods}</td>
+                                        </tr>
+                                    }
+                                }).collect_view()
+                            }}
+                        </tbody>
+                    </table>
+                </div>
             </section>
         </div>
     }
