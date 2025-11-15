@@ -1,0 +1,18 @@
+[package]
+name = "dex-gui"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos = { version = "0.6", features = ["csr"] }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+wasm-logger = "0.2"
+log = "0.4"
+gloo-file = { version = "0.3", features = ["futures"] }
+
+dex-core = { path = "../dex-core" }
+dex-analysis = { path = "../dex-analysis" }

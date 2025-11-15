@@ -26,6 +26,7 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             rustToolchain
+            trunk
             cargo-watch
             wasm-pack
             pkg-config

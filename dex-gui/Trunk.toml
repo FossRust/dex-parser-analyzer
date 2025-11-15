@@ -1,0 +1,10 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[[copy]]
+source = "static"
+
+[[copy]]
+source = "static/css"
+target = "css"

@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 use dex_core::format::MethodIdx;
@@ -12,6 +13,7 @@ use crate::{
 
 /// Run the enabled analyses on an already parsed [`DexFile`].
 pub fn analyze_dex<'a>(dex: &DexFile<'a>, config: &AnalysisConfig) -> AnalysisReport {
+    #[cfg(not(target_arch = "wasm32"))]
     let start = Instant::now();
     let mut findings = Vec::new();
     let mut stats = AnalysisStats::default();
@@ -35,7 +37,10 @@ pub fn analyze_dex<'a>(dex: &DexFile<'a>, config: &AnalysisConfig) -> AnalysisRe
         }
     }
 
-    stats.elapsed_ms = Some(start.elapsed().as_millis() as u64);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        stats.elapsed_ms = Some(start.elapsed().as_millis() as u64);
+    }
     AnalysisReport { findings, stats }
 }
 
