@@ -221,6 +221,13 @@ pub struct ClassDef {
     pub static_values_off: u32,
 }
 
+/// Variable-length list of [`TypeIdx`] entries referenced by protos and class data.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TypeList {
+    /// Element descriptors stored in order.
+    pub types: Vec<TypeIdx>,
+}
+
 /// Representation of a `try_item`.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct TryItem {
@@ -360,4 +367,50 @@ pub struct ParameterAnnotation {
     pub method_idx: MethodIdx,
     /// Offset to the parameter annotation list.
     pub annotations_offset: u32,
+}
+
+/// List of annotation set references, e.g. from class data.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnnotationSetRefList {
+    /// Offsets to [`AnnotationSetItem`] structures.
+    pub items: Vec<u32>,
+}
+
+/// Aggregation of annotations applied to a single entity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnnotationSetItem {
+    /// Offsets to [`AnnotationItem`] entries.
+    pub items: Vec<u32>,
+}
+
+/// Raw annotation payload decoded from the `annotation_item` section.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnnotationItem<'a> {
+    /// Visibility of the annotation (`runtime`, `build`, etc.).
+    pub visibility: u8,
+    /// Underlying `encoded_annotation` bytes.
+    pub encoded_annotation: &'a [u8],
+}
+
+/// Raw encoded array payload from the `encoded_array_item` section.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EncodedArrayItem<'a> {
+    /// Underlying `encoded_array` bytes.
+    pub data: &'a [u8],
+}
+
+/// Entry inside the `call_site_ids` table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CallSiteIdItem {
+    /// Offset to the encoded call-site array.
+    pub call_site_off: u32,
+}
+
+/// Entry inside the `method_handle_items` table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MethodHandleItem {
+    /// Kind of method handle (see DEX spec).
+    pub handle_type: u16,
+    /// Target field or method index.
+    pub field_or_method_idx: u32,
 }

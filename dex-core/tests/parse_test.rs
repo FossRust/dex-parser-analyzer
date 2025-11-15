@@ -42,3 +42,28 @@ fn decode_test_method_instructions() {
         }
     }
 }
+
+#[test]
+fn optional_sections_are_accessible() {
+    let bytes = load_fixture();
+    let dex = parse_dex(&bytes).expect("failed to parse dex");
+    for i in 0..dex.proto_count() {
+        let proto = dex
+            .proto_id(format::ProtoIdx::new(i as u32))
+            .expect("proto entry");
+        if proto.parameters_off != 0 {
+            let type_list = dex
+                .type_list(proto.parameters_off)
+                .expect("missing type list");
+            assert!(!type_list.types.is_empty());
+        }
+    }
+    for class_def in dex.class_defs() {
+        if class_def.static_values_off != 0 {
+            assert!(
+                dex.encoded_array(class_def.static_values_off).is_some(),
+                "encoded array missing for class static values"
+            );
+        }
+    }
+}

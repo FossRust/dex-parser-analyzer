@@ -1,13 +1,18 @@
 //! Parsing entry points and helpers for `.dex` binaries.
 
+use std::collections::BTreeMap;
+
 use crate::{
     error::{DexError, DexResult},
     format::{
-        AccessFlags, AnnotationsDirectoryItem, CatchHandler, ClassDataItem, ClassDef, ClassIdx,
-        CodeItem, DexHeader, EncodedCatchHandler, EncodedField, EncodedMethod, FieldAnnotation,
-        FieldId, FieldIdx, HEADER_SIZE, MAGIC_PREFIX, MapItem, MethodAnnotation, MethodId,
-        MethodIdx, ParameterAnnotation, ProtoId, ProtoIdx, StringId, StringIdx, TryItem, TypeId,
-        TypeIdx,
+        AccessFlags, AnnotationItem, AnnotationSetItem, AnnotationSetRefList,
+        AnnotationsDirectoryItem, CallSiteIdItem, CatchHandler, ClassDataItem, ClassDef, ClassIdx,
+        CodeItem, DexHeader, EncodedArrayItem, EncodedCatchHandler, EncodedField, EncodedMethod,
+        FieldAnnotation, FieldId, FieldIdx, HEADER_SIZE, MAGIC_PREFIX, MAP_TYPE_ANNOTATION_ITEM,
+        MAP_TYPE_ANNOTATION_SET_ITEM, MAP_TYPE_ANNOTATION_SET_REF_LIST, MAP_TYPE_CALL_SITE_ID_ITEM,
+        MAP_TYPE_ENCODED_ARRAY_ITEM, MAP_TYPE_METHOD_HANDLE_ITEM, MAP_TYPE_TYPE_LIST, MapItem,
+        MethodAnnotation, MethodHandleItem, MethodId, MethodIdx, ParameterAnnotation, ProtoId,
+        ProtoIdx, StringId, StringIdx, TryItem, TypeId, TypeIdx, TypeList,
     },
     model::DexFile,
 };
@@ -89,6 +94,8 @@ pub fn parse_dex<'a>(bytes: &'a [u8]) -> DexResult<DexFile<'a>> {
         None
     };
 
+    let optional = parse_optional_sections(bytes, &map_items)?;
+
     Ok(DexFile::new(
         bytes,
         header,
@@ -105,6 +112,13 @@ pub fn parse_dex<'a>(bytes: &'a [u8]) -> DexResult<DexFile<'a>> {
         map_items,
         annotations,
         link_data,
+        optional.type_lists,
+        optional.annotation_set_ref_lists,
+        optional.annotation_sets,
+        optional.annotation_items,
+        optional.encoded_arrays,
+        optional.call_sites,
+        optional.method_handles,
     ))
 }
 
@@ -528,11 +542,19 @@ fn parse_catch_handler(bytes: &[u8], cursor: &mut usize) -> DexResult<EncodedCat
 }
 
 fn read_u16(bytes: &[u8], cursor: &mut usize) -> DexResult<u16> {
+    read_u16_ctx(bytes, cursor, "code_item")
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> DexResult<u32> {
+    read_u32_ctx(bytes, cursor, "code_item")
+}
+
+fn read_u16_ctx(bytes: &[u8], cursor: &mut usize, context: &'static str) -> DexResult<u16> {
     let end = *cursor + 2;
     let chunk = bytes
         .get(*cursor..end)
         .ok_or(DexError::SectionOutOfBounds {
-            section: "code_item",
+            section: context,
             offset: *cursor,
             size: 2,
         })?;
@@ -540,17 +562,30 @@ fn read_u16(bytes: &[u8], cursor: &mut usize) -> DexResult<u16> {
     Ok(u16::from_le_bytes(chunk.try_into().unwrap()))
 }
 
-fn read_u32(bytes: &[u8], cursor: &mut usize) -> DexResult<u32> {
+fn read_u32_ctx(bytes: &[u8], cursor: &mut usize, context: &'static str) -> DexResult<u32> {
     let end = *cursor + 4;
     let chunk = bytes
         .get(*cursor..end)
         .ok_or(DexError::SectionOutOfBounds {
-            section: "code_item",
+            section: context,
             offset: *cursor,
             size: 4,
         })?;
     *cursor = end;
     Ok(u32::from_le_bytes(chunk.try_into().unwrap()))
+}
+
+fn read_uleb_from(bytes: &[u8], cursor: &mut usize, context: &'static str) -> DexResult<u32> {
+    if *cursor >= bytes.len() {
+        return Err(DexError::SectionOutOfBounds {
+            section: context,
+            offset: *cursor,
+            size: 1,
+        });
+    }
+    let (value, used) = read_uleb128(&bytes[*cursor..], context)?;
+    *cursor += used;
+    Ok(value)
 }
 
 /// Reads an unsigned LEB128 value, returning the parsed value and number of bytes consumed.
@@ -659,6 +694,296 @@ fn parse_annotations_directory(bytes: &[u8], offset: u32) -> DexResult<Annotatio
         method_annotations,
         parameter_annotations,
     })
+}
+
+struct OptionalSections<'a> {
+    type_lists: BTreeMap<u32, TypeList>,
+    annotation_set_ref_lists: BTreeMap<u32, AnnotationSetRefList>,
+    annotation_sets: BTreeMap<u32, AnnotationSetItem>,
+    annotation_items: BTreeMap<u32, AnnotationItem<'a>>,
+    encoded_arrays: BTreeMap<u32, EncodedArrayItem<'a>>,
+    call_sites: Vec<CallSiteIdItem>,
+    method_handles: Vec<MethodHandleItem>,
+}
+
+fn parse_optional_sections<'a>(
+    bytes: &'a [u8],
+    map_items: &[MapItem],
+) -> DexResult<OptionalSections<'a>> {
+    let mut type_lists = BTreeMap::new();
+    let mut annotation_set_ref_lists = BTreeMap::new();
+    let mut annotation_sets = BTreeMap::new();
+    let mut annotation_items = BTreeMap::new();
+    let mut encoded_arrays = BTreeMap::new();
+    let mut call_sites = Vec::new();
+    let mut method_handles = Vec::new();
+
+    for item in map_items {
+        match item.type_code {
+            MAP_TYPE_TYPE_LIST => {
+                insert_mapped(&mut type_lists, parse_type_lists(bytes, item)?);
+            }
+            MAP_TYPE_ANNOTATION_SET_REF_LIST => {
+                insert_mapped(
+                    &mut annotation_set_ref_lists,
+                    parse_annotation_set_ref_lists(bytes, item)?,
+                );
+            }
+            MAP_TYPE_ANNOTATION_SET_ITEM => {
+                insert_mapped(
+                    &mut annotation_sets,
+                    parse_annotation_set_items(bytes, item)?,
+                );
+            }
+            MAP_TYPE_ANNOTATION_ITEM => {
+                insert_mapped(&mut annotation_items, parse_annotation_items(bytes, item)?);
+            }
+            MAP_TYPE_ENCODED_ARRAY_ITEM => {
+                insert_mapped(&mut encoded_arrays, parse_encoded_array_items(bytes, item)?);
+            }
+            MAP_TYPE_CALL_SITE_ID_ITEM => {
+                call_sites.extend(parse_call_site_ids(bytes, item)?);
+            }
+            MAP_TYPE_METHOD_HANDLE_ITEM => {
+                method_handles.extend(parse_method_handles(bytes, item)?);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(OptionalSections {
+        type_lists,
+        annotation_set_ref_lists,
+        annotation_sets,
+        annotation_items,
+        encoded_arrays,
+        call_sites,
+        method_handles,
+    })
+}
+
+fn insert_mapped<T>(map: &mut BTreeMap<u32, T>, entries: Vec<(u32, T)>) {
+    for (offset, value) in entries {
+        map.insert(offset, value);
+    }
+}
+
+fn parse_type_lists(bytes: &[u8], item: &MapItem) -> DexResult<Vec<(u32, TypeList)>> {
+    let mut cursor = item.offset as usize;
+    let mut lists = Vec::with_capacity(item.size as usize);
+    for _ in 0..item.size {
+        let start = cursor;
+        let size = read_u32_ctx(bytes, &mut cursor, "type_list")? as usize;
+        let mut types = Vec::with_capacity(size);
+        for _ in 0..size {
+            let ty = read_u16_ctx(bytes, &mut cursor, "type_item")?;
+            types.push(TypeIdx::new(ty as u32));
+        }
+        if size % 2 != 0 {
+            let end = cursor.checked_add(2).ok_or(DexError::SectionOutOfBounds {
+                section: "type_list",
+                offset: cursor,
+                size: 2,
+            })?;
+            if end > bytes.len() {
+                return Err(DexError::SectionOutOfBounds {
+                    section: "type_list",
+                    offset: cursor,
+                    size: 2,
+                });
+            }
+            cursor = end;
+        }
+        lists.push((start as u32, TypeList { types }));
+    }
+    Ok(lists)
+}
+
+fn parse_annotation_set_ref_lists(
+    bytes: &[u8],
+    item: &MapItem,
+) -> DexResult<Vec<(u32, AnnotationSetRefList)>> {
+    let mut cursor = item.offset as usize;
+    let mut lists = Vec::with_capacity(item.size as usize);
+    for _ in 0..item.size {
+        let start = cursor;
+        let size = read_u32_ctx(bytes, &mut cursor, "annotation_set_ref_list")? as usize;
+        let mut entries = Vec::with_capacity(size);
+        for _ in 0..size {
+            let off = read_u32_ctx(bytes, &mut cursor, "annotation_set_ref_item")?;
+            entries.push(off);
+        }
+        lists.push((start as u32, AnnotationSetRefList { items: entries }));
+    }
+    Ok(lists)
+}
+
+fn parse_annotation_set_items(
+    bytes: &[u8],
+    item: &MapItem,
+) -> DexResult<Vec<(u32, AnnotationSetItem)>> {
+    let mut cursor = item.offset as usize;
+    let mut lists = Vec::with_capacity(item.size as usize);
+    for _ in 0..item.size {
+        let start = cursor;
+        let size = read_u32_ctx(bytes, &mut cursor, "annotation_set_item")? as usize;
+        let mut entries = Vec::with_capacity(size);
+        for _ in 0..size {
+            let off = read_u32_ctx(bytes, &mut cursor, "annotation_off_item")?;
+            entries.push(off);
+        }
+        lists.push((start as u32, AnnotationSetItem { items: entries }));
+    }
+    Ok(lists)
+}
+
+fn parse_annotation_items<'a>(
+    bytes: &'a [u8],
+    item: &MapItem,
+) -> DexResult<Vec<(u32, AnnotationItem<'a>)>> {
+    let mut cursor = item.offset as usize;
+    let mut annotations = Vec::with_capacity(item.size as usize);
+    for _ in 0..item.size {
+        let start = cursor;
+        let visibility = *bytes.get(cursor).ok_or(DexError::SectionOutOfBounds {
+            section: "annotation_item",
+            offset: cursor,
+            size: 1,
+        })?;
+        cursor += 1;
+        let annotation_start = cursor;
+        skip_encoded_annotation(bytes, &mut cursor)?;
+        let data = bytes
+            .get(annotation_start..cursor)
+            .ok_or(DexError::SectionOutOfBounds {
+                section: "annotation_item",
+                offset: annotation_start,
+                size: cursor - annotation_start,
+            })?;
+        annotations.push((
+            start as u32,
+            AnnotationItem {
+                visibility,
+                encoded_annotation: data,
+            },
+        ));
+    }
+    Ok(annotations)
+}
+
+fn parse_encoded_array_items<'a>(
+    bytes: &'a [u8],
+    item: &MapItem,
+) -> DexResult<Vec<(u32, EncodedArrayItem<'a>)>> {
+    let mut cursor = item.offset as usize;
+    let mut arrays = Vec::with_capacity(item.size as usize);
+    for _ in 0..item.size {
+        let start = cursor;
+        skip_encoded_array(bytes, &mut cursor)?;
+        let data = bytes
+            .get(start..cursor)
+            .ok_or(DexError::SectionOutOfBounds {
+                section: "encoded_array_item",
+                offset: start,
+                size: cursor - start,
+            })?;
+        arrays.push((start as u32, EncodedArrayItem { data }));
+    }
+    Ok(arrays)
+}
+
+fn parse_call_site_ids(bytes: &[u8], item: &MapItem) -> DexResult<Vec<CallSiteIdItem>> {
+    let mut cursor = item.offset as usize;
+    let mut entries = Vec::with_capacity(item.size as usize);
+    for _ in 0..item.size {
+        let call_site_off = read_u32_ctx(bytes, &mut cursor, "call_site_id_item")?;
+        entries.push(CallSiteIdItem { call_site_off });
+    }
+    Ok(entries)
+}
+
+fn parse_method_handles(bytes: &[u8], item: &MapItem) -> DexResult<Vec<MethodHandleItem>> {
+    let mut cursor = item.offset as usize;
+    let mut entries = Vec::with_capacity(item.size as usize);
+    for _ in 0..item.size {
+        let handle_type = read_u16_ctx(bytes, &mut cursor, "method_handle_item")?;
+        // Skip reserved field.
+        let _ = read_u16_ctx(bytes, &mut cursor, "method_handle_item")?;
+        let field_or_method_idx = read_u32_ctx(bytes, &mut cursor, "method_handle_item")?;
+        entries.push(MethodHandleItem {
+            handle_type,
+            field_or_method_idx,
+        });
+    }
+    Ok(entries)
+}
+
+fn skip_encoded_annotation(bytes: &[u8], cursor: &mut usize) -> DexResult<()> {
+    let _ = read_uleb_from(bytes, cursor, "encoded_annotation")?;
+    let size = read_uleb_from(bytes, cursor, "encoded_annotation")?;
+    for _ in 0..size {
+        let _ = read_uleb_from(bytes, cursor, "annotation_element")?;
+        skip_encoded_value(bytes, cursor)?;
+    }
+    Ok(())
+}
+
+fn skip_encoded_array(bytes: &[u8], cursor: &mut usize) -> DexResult<()> {
+    let size = read_uleb_from(bytes, cursor, "encoded_array")?;
+    for _ in 0..size {
+        skip_encoded_value(bytes, cursor)?;
+    }
+    Ok(())
+}
+
+fn skip_encoded_value(bytes: &[u8], cursor: &mut usize) -> DexResult<()> {
+    let header = *bytes.get(*cursor).ok_or(DexError::SectionOutOfBounds {
+        section: "encoded_value",
+        offset: *cursor,
+        size: 1,
+    })?;
+    *cursor += 1;
+    let value_type = header & 0x1F;
+    let value_arg = (header >> 5) as usize;
+    match value_type {
+        0x00 | 0x02 | 0x03 | 0x04 | 0x06 | 0x10 | 0x11 => {
+            let size = value_arg + 1;
+            let end = cursor
+                .checked_add(size)
+                .ok_or(DexError::SectionOutOfBounds {
+                    section: "encoded_value",
+                    offset: *cursor,
+                    size,
+                })?;
+            if end > bytes.len() {
+                return Err(DexError::SectionOutOfBounds {
+                    section: "encoded_value",
+                    offset: *cursor,
+                    size,
+                });
+            }
+            *cursor = end;
+        }
+        0x15 | 0x16 | 0x17 | 0x18 | 0x19 | 0x1A | 0x1B => {
+            let _ = read_uleb_from(bytes, cursor, "encoded_value")?;
+        }
+        0x1C => {
+            skip_encoded_array(bytes, cursor)?;
+        }
+        0x1D => {
+            skip_encoded_annotation(bytes, cursor)?;
+        }
+        0x1E | 0x1F => {
+            // null or boolean; nothing else to consume.
+        }
+        _ => {
+            return Err(DexError::Malformed {
+                context: "encoded_value",
+                message: "unknown value type",
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! High-level, consumer-friendly DEX abstractions.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use once_cell::unsync::OnceCell;
 
@@ -8,9 +8,10 @@ use crate::{
     bytecode::{Instruction, decode_instructions_internal},
     error::{DexError, DexResult},
     format::{
-        AccessFlags, AnnotationsDirectoryItem, ClassDataItem, ClassDef, ClassIdx, CodeItem,
-        DexHeader, FieldId, MapItem, MethodId, MethodIdx, ProtoId, ProtoIdx, StringId, StringIdx,
-        TypeId, TypeIdx,
+        AccessFlags, AnnotationItem, AnnotationSetItem, AnnotationSetRefList,
+        AnnotationsDirectoryItem, CallSiteIdItem, ClassDataItem, ClassDef, ClassIdx, CodeItem,
+        DexHeader, EncodedArrayItem, FieldId, MapItem, MethodHandleItem, MethodId, MethodIdx,
+        ProtoId, ProtoIdx, StringId, StringIdx, TypeId, TypeIdx, TypeList,
     },
 };
 
@@ -37,6 +38,13 @@ pub struct DexFile<'a> {
     annotations: Vec<Option<AnnotationsDirectoryItem>>,
     link_data: Option<&'a [u8]>,
     data_end: usize,
+    type_lists: BTreeMap<u32, TypeList>,
+    annotation_set_ref_lists: BTreeMap<u32, AnnotationSetRefList>,
+    annotation_sets: BTreeMap<u32, AnnotationSetItem>,
+    annotation_items: BTreeMap<u32, AnnotationItem<'a>>,
+    encoded_arrays: BTreeMap<u32, EncodedArrayItem<'a>>,
+    call_site_ids: Vec<CallSiteIdItem>,
+    method_handles: Vec<MethodHandleItem>,
 }
 
 impl<'a> DexFile<'a> {
@@ -57,6 +65,13 @@ impl<'a> DexFile<'a> {
         map_items: Vec<MapItem>,
         annotations: Vec<Option<AnnotationsDirectoryItem>>,
         link_data: Option<&'a [u8]>,
+        type_lists: BTreeMap<u32, TypeList>,
+        annotation_set_ref_lists: BTreeMap<u32, AnnotationSetRefList>,
+        annotation_sets: BTreeMap<u32, AnnotationSetItem>,
+        annotation_items: BTreeMap<u32, AnnotationItem<'a>>,
+        encoded_arrays: BTreeMap<u32, EncodedArrayItem<'a>>,
+        call_site_ids: Vec<CallSiteIdItem>,
+        method_handles: Vec<MethodHandleItem>,
     ) -> Self {
         let string_cache = vec![OnceCell::new(); string_ids.len()];
         Self {
@@ -77,6 +92,13 @@ impl<'a> DexFile<'a> {
             annotations,
             link_data,
             data_end: (header.data_off + header.data_size) as usize,
+            type_lists,
+            annotation_set_ref_lists,
+            annotation_sets,
+            annotation_items,
+            encoded_arrays,
+            call_site_ids,
+            method_handles,
         }
     }
 
@@ -259,6 +281,11 @@ impl<'a> DexFile<'a> {
         self.proto_ids.get(idx.to_usize())
     }
 
+    /// Number of prototype descriptors.
+    pub fn proto_count(&self) -> usize {
+        self.proto_ids.len()
+    }
+
     /// Returns the [`FieldId`] for the provided index.
     pub fn field_id(&self, idx: crate::format::FieldIdx) -> Option<&FieldId> {
         self.field_ids.get(idx.to_usize())
@@ -350,6 +377,41 @@ impl<'a> DexFile<'a> {
     /// Decodes the bytecode stream for a method.
     pub fn decode_instructions(&self, method: MethodIdx) -> DexResult<Vec<Instruction>> {
         decode_instructions_internal(self, method)
+    }
+
+    /// Returns the parsed [`TypeList`] at the given file offset.
+    pub fn type_list(&self, offset: u32) -> Option<&TypeList> {
+        self.type_lists.get(&offset)
+    }
+
+    /// Returns the parsed [`AnnotationSetRefList`] at the given file offset.
+    pub fn annotation_set_ref_list(&self, offset: u32) -> Option<&AnnotationSetRefList> {
+        self.annotation_set_ref_lists.get(&offset)
+    }
+
+    /// Returns the parsed [`AnnotationSetItem`] at the given file offset.
+    pub fn annotation_set(&self, offset: u32) -> Option<&AnnotationSetItem> {
+        self.annotation_sets.get(&offset)
+    }
+
+    /// Returns the [`AnnotationItem`] located at `offset`.
+    pub fn annotation_item(&self, offset: u32) -> Option<&AnnotationItem<'a>> {
+        self.annotation_items.get(&offset)
+    }
+
+    /// Returns the [`EncodedArrayItem`] located at `offset`.
+    pub fn encoded_array(&self, offset: u32) -> Option<&EncodedArrayItem<'a>> {
+        self.encoded_arrays.get(&offset)
+    }
+
+    /// Returns the table of call-site identifiers.
+    pub fn call_site_ids(&self) -> &[CallSiteIdItem] {
+        &self.call_site_ids
+    }
+
+    /// Returns the table of method handles.
+    pub fn method_handles(&self) -> &[MethodHandleItem] {
+        &self.method_handles
     }
 }
 
