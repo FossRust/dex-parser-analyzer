@@ -1,3 +1,14 @@
 [build]
 target = "index.html"
 dist = "dist"
+
+[optimization]
+# 如果 Trunk 版本支持，这通常是默认的。但我们将手动确保它运行。
+# wasm-opt = true
+
+[[hooks]]
+stage = "post_build"
+# 在构建完成后运行 wasm-opt 进一步压缩
+# 注意：Trunk 会在 dist 目录下生成文件，我们需要找到它
+command = "powershell"
+command_arguments = ["-NoProfile", "-Command", "Get-ChildItem -Path dist -Filter *.wasm | ForEach-Object { & wasm-opt $_.FullName -Oz --all-features -o $_.FullName }"]

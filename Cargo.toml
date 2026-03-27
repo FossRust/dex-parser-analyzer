@@ -5,3 +5,15 @@ members = [
     "dex-gui",
 ]
 resolver = "2"
+
+[profile.release]
+# 针对体积进行优化 (Optimize for size)
+opt-level = 'z'
+# 启用链接时间优化 (Link Time Optimization)
+lto = true
+# 减少并行编译单元，以获得更好的 LTO 效果
+codegen-units = 1
+# 移除 Panic 时的展开信息，进一步减小体积
+panic = 'abort'
+# 自动移除所有调试符号
+strip = true
