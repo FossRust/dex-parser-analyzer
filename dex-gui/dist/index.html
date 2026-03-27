@@ -16,18 +16,14 @@
   <script>
     hljs.highlightAll();
   </script>
-<link rel="modulepreload" href="/dex-gui-4485766534f68c88.js" crossorigin="anonymous" integrity="sha384-7tThnLVCWedkmebTd1tliZ8i12CuVAZGdKhamWMR/FD1fC5i2ZY78ZJwGsLpPGsq"><link rel="preload" href="/dex-gui-4485766534f68c88_bg.wasm" crossorigin="anonymous" integrity="sha384-nhiAZXEPdfaVtQmu4HUjIfBtk+NnYh9eqW+p1qPay7wa7bsTUeis58VKHq1y2H1H" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/dex-gui-301154cf916389e1.js" crossorigin="anonymous" integrity="sha384-lCMc2dcUxTjT1P6aFqDClUNTysU8Op5mrVaA8K1UsLzXJ2Oawj4LLOnEfIBkeE+T"><link rel="preload" href="/dex-gui-301154cf916389e1_bg.wasm" crossorigin="anonymous" integrity="sha384-GCoKQ0pGLPsBUJ1AQbkXoM8vXZ7kQHmthUqher4on4MNZGK/NfYSb5t4Vf33teed" as="fetch" type="application/wasm"></head>
 
 <body>
   <div id="root"></div>
-  <script type="module">
-    import init from "./dex-gui.js";
-    init();
-  </script>
 
 <script type="module">
-import init, * as bindings from '/dex-gui-4485766534f68c88.js';
-const wasm = await init({ module_or_path: '/dex-gui-4485766534f68c88_bg.wasm' });
+import init, * as bindings from '/dex-gui-301154cf916389e1.js';
+const wasm = await init({ module_or_path: '/dex-gui-301154cf916389e1_bg.wasm' });
 
 
 window.wasmBindings = bindings;

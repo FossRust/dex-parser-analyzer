@@ -246,3 +246,101 @@ pub fn dex_to_overview(dex: &DexFile<'_>) -> DexResult<DexOverviewDto> {
         classes,
     })
 }
+
+/// String entry for browsing.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StringEntry {
+    /// Index in string_ids table.
+    pub idx: u32,
+    /// The string content.
+    pub value: String,
+}
+
+/// Convert all strings to DTOs.
+pub fn strings_to_dto(dex: &DexFile<'_>) -> Vec<StringEntry> {
+    let mut entries = Vec::with_capacity(dex.string_count() as usize);
+    for (idx, value) in dex.strings().enumerate() {
+        entries.push(StringEntry {
+            idx: idx as u32,
+            value: value.to_string(),
+        });
+    }
+    entries
+}
+
+/// Method detail with Smali code.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MethodDetailDto {
+    /// Raw method index.
+    pub idx: u32,
+    /// Class descriptor.
+    pub class: String,
+    /// Method name.
+    pub name: String,
+    /// Method signature (params + return type).
+    pub signature: String,
+    /// Access flags.
+    pub access_flags: String,
+    /// Smali code lines.
+    pub smali_code: Vec<String>,
+}
+
+/// Convert a method to detail DTO with Smali code.
+pub fn method_to_detail_dto(dex: &DexFile<'_>, method: &MethodHandle<'_>) -> DexResult<MethodDetailDto> {
+    use crate::decompiler::disassemble_method;
+    
+    let class = method
+        .class()
+        .and_then(|class| class.descriptor().ok().map(|s| s.to_string()))
+        .unwrap_or_else(|| "<unknown>".to_string());
+    
+    let name = method.name()?.to_string();
+    
+    let proto = method.prototype()?;
+    
+    // Get return type
+    let return_type = dex.type_descriptor(proto.return_type_idx)
+        .unwrap_or("?");
+    
+    // Get parameter types
+    let mut params = Vec::new();
+    if proto.parameters_off != 0 {
+        if let Some(type_list) = dex.type_list(proto.parameters_off) {
+            for type_idx in &type_list.types {
+                params.push(dex.type_descriptor(*type_idx).unwrap_or("?"));
+            }
+        }
+    }
+    let params_str = params.join(", ");
+    
+    let signature = format!("({}){}", params_str, return_type);
+    
+    let access_flags_str = dex.method_access_flags(method.index())
+        .map(|flags| {
+            let mut parts = Vec::new();
+            if flags.contains(crate::format::AccessFlags::PUBLIC) { parts.push("public"); }
+            if flags.contains(crate::format::AccessFlags::PRIVATE) { parts.push("private"); }
+            if flags.contains(crate::format::AccessFlags::PROTECTED) { parts.push("protected"); }
+            if flags.contains(crate::format::AccessFlags::STATIC) { parts.push("static"); }
+            if flags.contains(crate::format::AccessFlags::FINAL) { parts.push("final"); }
+            if flags.contains(crate::format::AccessFlags::SYNCHRONIZED) { parts.push("synchronized"); }
+            if flags.contains(crate::format::AccessFlags::NATIVE) { parts.push("native"); }
+            if flags.contains(crate::format::AccessFlags::ABSTRACT) { parts.push("abstract"); }
+            if flags.contains(crate::format::AccessFlags::CONSTRUCTOR) { parts.push("constructor"); }
+            parts.join(" ")
+        })
+        .unwrap_or_else(String::new);
+    
+    let smali_code = disassemble_method(dex, method)
+        .map(|d| d.code)
+        .unwrap_or_else(|_| vec!["# Error disassembling method".to_string()]);
+    
+    Ok(MethodDetailDto {
+        idx: method.index().raw(),
+        class,
+        name,
+        signature,
+        access_flags: access_flags_str,
+        smali_code,
+    })
+}

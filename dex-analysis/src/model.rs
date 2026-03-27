@@ -27,6 +27,19 @@ pub enum VulnerabilityKind {
     Custom(Cow<'static, str>),
 }
 
+impl VulnerabilityKind {
+    /// 获取中文描述
+    pub fn description(&self) -> String {
+        match self {
+            VulnerabilityKind::HardcodedSecret => "硬编码密钥".to_string(),
+            VulnerabilityKind::WeakCrypto => "弱加密算法".to_string(),
+            VulnerabilityKind::InsecureRandom => "不安全随机数".to_string(),
+            VulnerabilityKind::InsecureCommunication => "不安全通信".to_string(),
+            VulnerabilityKind::Custom(s) => s.to_string(),
+        }
+    }
+}
+
 /// Location metadata describing where an issue was found.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Location {

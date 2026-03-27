@@ -6,6 +6,7 @@
 //! `dex-analysis` crate.
 
 pub mod bytecode;
+pub mod decompiler;
 pub mod dto;
 pub mod format;
 pub mod graphs;
