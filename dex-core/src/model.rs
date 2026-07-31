@@ -433,7 +433,7 @@ impl<'a> Iterator for Strings<'a> {
         Some(
             self.dex
                 .try_string(idx)
-                .unwrap_or("\u{FFFD}"),
+                .unwrap_or_else(|err| panic!("invalid string entry: {err}")),
         )
     }
 
