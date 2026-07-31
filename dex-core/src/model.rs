@@ -185,7 +185,8 @@ impl<'a> DexFile<'a> {
     /// Returns all strings as an iterator.
     ///
     /// The iterator lazily decodes each entry and therefore doubles as a
-    /// low-cost validation pass that ensures all strings can be materialized.
+    /// low-cost validation pass. Malformed entries yield `Err` (see
+    /// [`Strings`]) rather than panicking.
     pub fn strings(&'a self) -> Strings<'a> {
         Strings {
             dex: self,
@@ -416,13 +417,18 @@ impl<'a> DexFile<'a> {
 }
 
 /// Iterator over all strings in a `DexFile`.
+///
+/// Each item is a [`DexResult`]: a string whose data is malformed (e.g. an
+/// undecodable MUTF-8 sequence) yields `Err` instead of panicking, so parsing
+/// a hostile or corrupt DEX file is total. Every index in `string_ids` maps to
+/// exactly one item, so the iterator is still `ExactSizeIterator`.
 pub struct Strings<'a> {
     dex: &'a DexFile<'a>,
     index: usize,
 }
 
 impl<'a> Iterator for Strings<'a> {
-    type Item = &'a str;
+    type Item = DexResult<&'a str>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index >= self.dex.string_ids.len() {
@@ -430,11 +436,7 @@ impl<'a> Iterator for Strings<'a> {
         }
         let idx = StringIdx::new(self.index as u32);
         self.index += 1;
-        Some(
-            self.dex
-                .try_string(idx)
-                .unwrap_or_else(|err| panic!("invalid string entry: {err}")),
-        )
+        Some(self.dex.try_string(idx))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

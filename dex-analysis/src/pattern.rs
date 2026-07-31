@@ -402,6 +402,7 @@ fn preview_literal(value: &str) -> String {
 
 fn references_cipher_descriptor(dex: &DexFile<'_>) -> bool {
     dex.strings()
+        .filter_map(Result::ok)
         .any(|value| value.contains("javax/crypto/Cipher"))
 }
 

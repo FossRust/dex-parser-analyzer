@@ -10,7 +10,7 @@ fn parse_test_dex_header() {
     let dex = parse_dex(&bytes).expect("failed to parse dex");
     let class = dex.classes().next().expect("expected class entry");
     assert_eq!(class.descriptor().unwrap(), "LTest;");
-    assert!(dex.strings().any(|s| s == "Test.java"));
+    assert!(dex.strings().filter_map(Result::ok).any(|s| s == "Test.java"));
     assert!(!dex.map_items().is_empty());
     assert!(dex.section_bytes(format::MAP_TYPE_TYPE_ID_ITEM).is_some());
 }
