@@ -396,7 +396,13 @@ fn preview_literal(value: &str) -> String {
     if trimmed.len() <= MAX_LEN {
         trimmed.to_string()
     } else {
-        format!("{}…", &trimmed[..MAX_LEN])
+        // Find the largest byte index ≤ MAX_LEN that sits on a char boundary,
+        // so we never slice through a multi-byte character.
+        let boundary = (0..=MAX_LEN)
+            .rev()
+            .find(|&i| trimmed.is_char_boundary(i))
+            .unwrap_or(0);
+        format!("{}…", &trimmed[..boundary])
     }
 }
 
