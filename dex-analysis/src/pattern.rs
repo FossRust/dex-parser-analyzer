@@ -396,7 +396,11 @@ fn preview_literal(value: &str) -> String {
     if trimmed.len() <= MAX_LEN {
         trimmed.to_string()
     } else {
-        format!("{}…", &trimmed[..MAX_LEN])
+        let mut end = MAX_LEN;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &trimmed[..end])
     }
 }
 
