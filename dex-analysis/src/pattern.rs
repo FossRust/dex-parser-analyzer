@@ -176,7 +176,7 @@ fn detect_weak_crypto(
     xrefs: &graphs::Xrefs,
     string_to_methods: &HashMap<u32, Vec<u32>>,
 ) {
-    let sink_lookup = build_sink_lookup(dex);
+    let sink_lookup = build_sink_lookup(dex, xrefs);
     if sink_lookup.is_empty() {
         if references_cipher_descriptor(dex) {
             findings.push(Finding {
@@ -297,17 +297,20 @@ fn detect_insecure_http(
     }
 }
 
-fn build_sink_lookup<'a>(dex: &'a DexFile<'_>) -> HashMap<u32, &'a MethodPattern> {
+fn build_sink_lookup<'a>(dex: &'a DexFile<'_>, xrefs: &graphs::Xrefs) -> HashMap<u32, &'a MethodPattern> {
     let mut lookup = HashMap::new();
-    for idx in 0..dex.method_count() {
-        let method_idx = MethodIdx::new(idx as u32);
+    let mut callees: Vec<u32> = xrefs.method_calls.iter().map(|(_, callee)| *callee).collect();
+    callees.sort_unstable();
+    callees.dedup();
+    for idx in callees {
+        let method_idx = MethodIdx::new(idx);
         let summary = dex.method_summary(method_idx);
         for sink in CRYPTO_SINKS {
             if summary.class == sink.class
                 && summary.name == sink.name
                 && summary.signature == sink.signature
             {
-                lookup.insert(idx as u32, sink);
+                lookup.insert(idx, sink);
             }
         }
     }
