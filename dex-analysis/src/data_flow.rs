@@ -94,7 +94,7 @@ where
 {
     let (cfg, instructions) = graphs::build_method_cfg_with_instructions(dex, method)?;
     let ctx = AnalysisContext::new(dex, method);
-    Ok(run_forward_with_cfg(analysis, &cfg, &instructions, ctx))
+    Ok(run_forward_with_cfg(analysis, &cfg, instructions.as_slice(), ctx))
 }
 
 /// Execute a forward analysis using a pre-built CFG and decoded instructions.

@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::{
     config::AnalysisConfig,
-    model::{describe_method, Finding, Location, MethodSummary, Severity, VulnerabilityKind},
+    model::{Finding, Location, MethodSummary, Severity, VulnerabilityKind},
 };
 
 /// Execute structural CFG/XREF driven analyses. The first iteration focuses on
@@ -26,16 +26,16 @@ pub fn run_structural_checks(
         }
         let mut web = WebViewState::default();
         let mut literals = LiteralTracker::default();
-        let method_summary = describe_method(dex, method_idx);
+        let method_summary = dex.method_summary(method_idx);
         let mut calls_ssl_proceed = false;
-        for inst in &instructions {
+        for inst in instructions {
             literals.observe(inst);
             if let Some(target) = inst
                 .reference
                 .as_ref()
                 .and_then(|r| method_reference_target(r))
             {
-                let summary = describe_method(dex, target);
+                let summary = dex.method_summary(target);
                 match (
                     summary.class.as_str(),
                     summary.name.as_str(),

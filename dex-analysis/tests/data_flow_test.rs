@@ -47,9 +47,9 @@ fn opcode_collector_matches_instruction_set() {
         graphs::build_method_cfg_with_instructions(&dex, method).expect("cfg");
     let ctx = AnalysisContext::new(&dex, method);
     let analysis = OpcodeCollector;
-    let manual = data_flow::run_forward_with_cfg(&analysis, &cfg, &instructions, ctx);
+    let manual = data_flow::run_forward_with_cfg(&analysis, &cfg, instructions.as_slice(), ctx);
     let mut expected = BTreeSet::new();
-    for inst in &instructions {
+    for inst in instructions.iter() {
         if !is_payload(inst) {
             expected.insert(inst.opcode);
         }

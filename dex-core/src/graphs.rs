@@ -1,6 +1,6 @@
 //! Graph construction utilities (CFG, call graph, and xrefs).
 
-use std::collections::{BTreeSet, HashMap};
+use std::{collections::{BTreeSet, HashMap}, rc::Rc};
 
 use petgraph::graph::{Graph, NodeIndex};
 use serde::{Deserialize, Serialize};
@@ -63,11 +63,11 @@ pub fn build_method_cfg(dex: &DexFile<'_>, method: MethodIdx) -> DexResult<Cfg> 
 pub fn build_method_cfg_with_instructions(
     dex: &DexFile<'_>,
     method: MethodIdx,
-) -> DexResult<(Cfg, Vec<Instruction>)> {
+) -> DexResult<(Cfg, Rc<Vec<Instruction>>)> {
     let Some(code_item) = dex.code_item(method) else {
-        return Ok((Graph::new(), Vec::new()));
+        return Ok((Graph::new(), Rc::new(Vec::new())));
     };
-    let instructions = dex.decode_instructions(method)?;
+    let instructions = dex.decode_instructions_rc(method)?;
     let cfg = build_cfg_from_parts(code_item, &instructions);
     Ok((cfg, instructions))
 }
@@ -395,7 +395,7 @@ pub fn build_xrefs(dex: &DexFile<'_>) -> DexResult<Xrefs> {
             Ok(ins) => ins,
             Err(_) => continue,
         };
-        for ins in &instructions {
+        for ins in instructions {
             if is_invoke(ins.opcode) {
                 if let Some(target) = method_reference(&ins.reference, dex.method_count()) {
                     xrefs.method_calls.push((idx as u32, target as u32));

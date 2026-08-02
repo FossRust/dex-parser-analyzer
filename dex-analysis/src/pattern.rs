@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::{
     config::AnalysisConfig,
-    model::{describe_method, Finding, Location, Severity, VulnerabilityKind},
+    model::{Finding, Location, Severity, VulnerabilityKind},
 };
 
 const SECRET_MIN_LENGTH: usize = 8;
@@ -301,7 +301,7 @@ fn build_sink_lookup<'a>(dex: &'a DexFile<'_>) -> HashMap<u32, &'a MethodPattern
     let mut lookup = HashMap::new();
     for idx in 0..dex.method_count() {
         let method_idx = MethodIdx::new(idx as u32);
-        let summary = describe_method(dex, method_idx);
+        let summary = dex.method_summary(method_idx);
         for sink in CRYPTO_SINKS {
             if summary.class == sink.class
                 && summary.name == sink.name

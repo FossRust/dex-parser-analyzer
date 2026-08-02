@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::{
     config::AnalysisConfig,
     data_flow::{self, AnalysisContext, ForwardAnalysis},
-    model::{describe_method, Finding, Location, MethodSummary, Severity, VulnerabilityKind},
+    model::{Finding, Location, MethodSummary, Severity, VulnerabilityKind},
 };
 
 struct MethodPattern {
@@ -180,6 +180,24 @@ pub fn run_taint_checks(
         if register_count == 0 {
             continue;
         }
+
+        // Taint can only ever begin at a source invocation (or a passthrough
+        // carrying source-produced taint). If this method does not reference
+        // any source method, no register can become tainted and the whole
+        // CFG + worklist pass is wasted work — skip it.
+        let Ok(instructions) = dex.decode_instructions(method) else {
+            continue;
+        };
+        let references_source = instructions.iter().any(|inst| {
+            matches!(
+                inst.reference.as_ref(),
+                Some(Reference::Method(target)) if lookup.sources.contains_key(&target.raw())
+            )
+        });
+        if !references_source {
+            continue;
+        }
+
         let analysis = MethodTaintAnalysis::new(register_count, &lookup);
         if data_flow::run_forward(dex, method, &analysis).is_err() {
             continue;
@@ -226,7 +244,7 @@ impl MethodLookup<'static> {
         let mut sinks = HashMap::new();
         for idx in 0..dex.method_count() {
             let method_idx = MethodIdx::new(idx as u32);
-            let summary = describe_method(dex, method_idx);
+            let summary = dex.method_summary(method_idx);
             for src in SOURCES {
                 if summary.class == src.class
                     && summary.name == src.name
@@ -363,7 +381,7 @@ impl<'a> ForwardAnalysis for MethodTaintAnalysis<'a> {
 
             if let Some(Reference::Method(target)) = inst.reference.as_ref() {
                 let raw = target.raw();
-                let summary = describe_method(ctx.dex, *target);
+                let summary = ctx.dex.method_summary(*target);
                 if let Some(_source) = self.lookup.sources.get(&raw) {
                     pending_source = Some(PendingSource::Direct);
                     continue;

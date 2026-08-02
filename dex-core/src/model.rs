@@ -1,6 +1,11 @@
 //! High-level, consumer-friendly DEX abstractions.
 
-use std::{borrow::Cow, collections::BTreeMap};
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    rc::Rc,
+    sync::OnceLock,
+};
 
 use once_cell::unsync::OnceCell;
 
@@ -34,6 +39,8 @@ pub struct DexFile<'a> {
     method_access: Vec<AccessFlags>,
     method_code: Vec<Option<CodeItem<'a>>>,
     string_cache: Vec<OnceCell<String>>,
+    instruction_cache: Vec<OnceCell<Rc<Vec<Instruction>>>>,
+    method_summary_cache: Vec<OnceCell<MethodSummary>>,
     map_items: Box<[MapItem]>,
     annotations: Vec<Option<AnnotationsDirectoryItem>>,
     link_data: Option<&'a [u8]>,
@@ -74,6 +81,8 @@ impl<'a> DexFile<'a> {
         method_handles: Vec<MethodHandleItem>,
     ) -> Self {
         let string_cache = vec![OnceCell::new(); string_ids.len()];
+        let instruction_cache = vec![OnceCell::new(); method_ids.len()];
+        let method_summary_cache = vec![OnceCell::new(); method_ids.len()];
         Self {
             data,
             header,
@@ -88,6 +97,8 @@ impl<'a> DexFile<'a> {
             method_access,
             method_code,
             string_cache,
+            instruction_cache,
+            method_summary_cache,
             map_items: map_items.into_boxed_slice(),
             annotations,
             link_data,
@@ -376,8 +387,39 @@ impl<'a> DexFile<'a> {
     }
 
     /// Decodes the bytecode stream for a method.
-    pub fn decode_instructions(&self, method: MethodIdx) -> DexResult<Vec<Instruction>> {
-        decode_instructions_internal(self, method)
+    ///
+    /// Results are cached, so repeated calls for the same method share one
+    /// allocation. The returned slice borrows the cache.
+    pub fn decode_instructions(&self, method: MethodIdx) -> DexResult<&[Instruction]> {
+        let raw_idx = method.to_usize();
+        let cache = self
+            .instruction_cache
+            .get(raw_idx)
+            .ok_or(DexError::InvalidIndex {
+                table: "method_ids",
+                index: method.raw(),
+            })?;
+        let rc = cache.get_or_try_init(|| {
+            decode_instructions_internal(self, method).map(Rc::new)
+        })?;
+        Ok(rc.as_slice())
+    }
+
+    /// Decodes the bytecode stream for a method, returning an owning
+    /// reference-counted handle. The instructions themselves are decoded at
+    /// most once and shared with all subsequent callers.
+    pub fn decode_instructions_rc(&self, method: MethodIdx) -> DexResult<Rc<Vec<Instruction>>> {
+        let raw_idx = method.to_usize();
+        let cache = self
+            .instruction_cache
+            .get(raw_idx)
+            .ok_or(DexError::InvalidIndex {
+                table: "method_ids",
+                index: method.raw(),
+            })?;
+        Ok(Rc::clone(cache.get_or_try_init(|| {
+            decode_instructions_internal(self, method).map(Rc::new)
+        })?))
     }
 
     /// Returns the parsed [`TypeList`] at the given file offset.
@@ -414,6 +456,74 @@ impl<'a> DexFile<'a> {
     pub fn method_handles(&self) -> &[MethodHandleItem] {
         &self.method_handles
     }
+
+    /// Returns a resolved, cached [`MethodSummary`] for the given method.
+    ///
+    /// The class/name/signature strings are resolved at most once per method
+    /// and reused by every analysis pass, which keeps repeated invocations
+    /// (structural, taint, pattern) from re-decoding the same descriptor.
+    pub fn method_summary(&self, idx: MethodIdx) -> &MethodSummary {
+        let raw_idx = idx.to_usize();
+        let Some(cache) = self.method_summary_cache.get(raw_idx) else {
+            return UNKNOWN_SUMMARY.get_or_init(MethodSummary::unknown);
+        };
+        cache.get_or_init(|| describe_method_impl(self, idx))
+    }
+}
+
+static UNKNOWN_SUMMARY: OnceLock<MethodSummary> = OnceLock::new();
+
+/// Convenience container summarizing a method descriptor.
+#[derive(Debug, Clone)]
+pub struct MethodSummary {
+    pub class: String,
+    pub name: String,
+    pub signature: String,
+}
+
+impl MethodSummary {
+    fn unknown() -> Self {
+        Self {
+            class: "<unknown>".into(),
+            name: "<unknown>".into(),
+            signature: "()V".into(),
+        }
+    }
+}
+
+fn describe_method_impl(dex: &DexFile<'_>, method: MethodIdx) -> MethodSummary {
+    let Some(method_id) = dex.method_id(method) else {
+        return MethodSummary::unknown();
+    };
+    let class = dex
+        .type_descriptor(method_id.class_idx)
+        .unwrap_or("<unknown>")
+        .to_string();
+    let name = dex
+        .string(method_id.name_idx)
+        .unwrap_or("<unknown>")
+        .to_string();
+    let signature = proto_signature(dex, method_id.proto_idx).unwrap_or_else(|| "()V".into());
+    MethodSummary {
+        class,
+        name,
+        signature,
+    }
+}
+
+fn proto_signature(dex: &DexFile<'_>, proto_idx: ProtoIdx) -> Option<String> {
+    let proto = dex.proto_id(proto_idx)?;
+    let mut signature = String::from("(");
+    if proto.parameters_off != 0 {
+        if let Some(list) = dex.type_list(proto.parameters_off) {
+            for ty in &list.types {
+                signature.push_str(dex.type_descriptor(*ty)?);
+            }
+        }
+    }
+    signature.push(')');
+    signature.push_str(dex.type_descriptor(proto.return_type_idx)?);
+    Some(signature)
 }
 
 /// Iterator over all strings in a `DexFile`.
@@ -578,7 +688,7 @@ impl<'a> MethodHandle<'a> {
 
     /// Decodes bytecode instructions for this method.
     pub fn instructions(&self) -> DexResult<Vec<Instruction>> {
-        self.dex.decode_instructions(self.idx)
+        Ok(self.dex.decode_instructions(self.idx)?.to_vec())
     }
 }
 
