@@ -175,7 +175,7 @@ struct LiteralTracker {
 
 impl LiteralTracker {
     fn observe(&mut self, inst: &dex_core::bytecode::Instruction) {
-        let name = inst.name;
+        let name = inst.name();
         if name.starts_with("const") {
             if let (Some(&dst), Some(value)) = (inst.registers.get(0), inst.literal) {
                 self.values.insert(dst, value);

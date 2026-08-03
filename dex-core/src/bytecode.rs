@@ -10,15 +10,16 @@ use crate::{
 
 const MAX_INLINE_REGS: usize = 8;
 
-/// Decoded Dalvik instruction.
+/// Decoded Dalvik instruction. The struct stays deliberately lean (no `name`
+/// string — that's derived from the opcode) so the per-method decode cache
+/// doesn't balloon: ~7M instructions × <112 bytes keeps the working set small
+/// enough to avoid cache thrash on low-memory hosts.
 #[derive(Clone, Debug)]
 pub struct Instruction {
     /// Program counter measured in 16-bit code units.
     pub pc: u32,
     /// Raw opcode byte.
     pub opcode: u8,
-    /// Symbolic opcode name.
-    pub name: &'static str,
     /// Instruction format metadata.
     pub format: InstructionFormat,
     /// Registers referenced by the instruction (order depends on opcode).
@@ -32,11 +33,9 @@ pub struct Instruction {
     /// Range metadata for range invoke instructions.
     pub range: Option<RangeInfo>,
     /// Parsed switch payload if the instruction references one.
-    pub switch: Option<SwitchPayload>,
+    pub switch: Option<Box<SwitchPayload>>,
     /// Parsed fill-array-data payload if referenced.
-    pub array: Option<ArrayPayload>,
-    /// Raw bytes for instructions whose format isn't fully decoded yet.
-    pub raw: Option<Vec<u8>>,
+    pub array: Option<Box<ArrayPayload>>,
     reference_kind: ReferenceType,
     reference_kind2: ReferenceType,
     /// Optional secondary reference (used by call-site/method-proto aware formats).
@@ -52,7 +51,6 @@ impl Instruction {
         Self {
             pc: pc_units as u32,
             opcode: info.opcode,
-            name: info.name,
             format: info.format,
             registers: SmallVec::new(),
             literal: None,
@@ -62,7 +60,6 @@ impl Instruction {
             range: None,
             switch: None,
             array: None,
-            raw: None,
             reference_kind: info.reference,
             reference_kind2: info.reference2,
             verification_error: None,
@@ -70,11 +67,10 @@ impl Instruction {
         }
     }
 
-    fn payload(name: &'static str, format: InstructionFormat, pc_units: usize) -> Self {
+    fn payload(format: InstructionFormat, pc_units: usize) -> Self {
         Self {
             pc: pc_units as u32,
             opcode: 0x00,
-            name,
             format,
             registers: SmallVec::new(),
             literal: None,
@@ -83,7 +79,6 @@ impl Instruction {
             range: None,
             switch: None,
             array: None,
-            raw: None,
             reference_kind: ReferenceType::None,
             reference_kind2: ReferenceType::None,
             secondary_reference: None,
@@ -95,6 +90,11 @@ impl Instruction {
     /// Returns the number of 16-bit code units consumed by this instruction.
     pub fn code_units(&self) -> usize {
         self.format.units().unwrap_or(0)
+    }
+
+    /// Returns the symbolic name for this instruction's opcode.
+    pub fn name(&self) -> &'static str {
+        OPCODE_TABLE.get(self.opcode as usize).map(|i| i.name).unwrap_or("UNKNOWN")
     }
 }
 
@@ -320,23 +320,27 @@ fn decode_format(
             let payload_pc = compute_payload_pc(pc_units, offset, total_units)?;
             match inst.opcode {
                 0x2b => {
-                    inst.switch = Some(parse_switch_payload(
+                    inst.switch = Some(Box::new(parse_switch_payload(
                         bytes,
                         payload_pc,
                         total_units,
                         SwitchKind::Packed,
-                    )?);
+                    )?));
                 }
                 0x2c => {
-                    inst.switch = Some(parse_switch_payload(
+                    inst.switch = Some(Box::new(parse_switch_payload(
                         bytes,
                         payload_pc,
                         total_units,
                         SwitchKind::Sparse,
-                    )?);
+                    )?));
                 }
                 0x26 => {
-                    inst.array = Some(parse_array_payload(bytes, payload_pc, total_units)?);
+                    inst.array = Some(Box::new(parse_array_payload(
+                        bytes,
+                        payload_pc,
+                        total_units,
+                    )?));
                 }
                 _ => {}
             }
@@ -373,9 +377,7 @@ fn decode_format(
             inst.registers.push(read_u8(bytes, start + 1)? as u16);
             inst.literal = Some(read_i64(bytes, start + 2)?);
         }
-        _ => {
-            inst.raw = Some(bytes[start..start + inst.format.bytes().unwrap_or(2)].to_vec());
-        }
+        _ => {}
     }
     Ok(())
 }
@@ -514,11 +516,8 @@ fn decode_payload(
     }
     match first_word >> 8 {
         0x01 => {
-            let mut inst = Instruction::payload(
-                "PACKED_SWITCH_PAYLOAD",
-                InstructionFormat::PackedSwitchPayload,
-                pc_units,
-            );
+            let mut inst =
+                Instruction::payload(InstructionFormat::PackedSwitchPayload, pc_units);
             let size = read_u16(bytes, start + 2)? as usize;
             let first_key = read_i32(bytes, start + 4)?;
             let mut targets = Vec::with_capacity(size);
@@ -527,16 +526,13 @@ fn decode_payload(
                 targets.push(read_i32(bytes, offset)?);
                 offset += 4;
             }
-            inst.switch = Some(SwitchPayload::Packed { first_key, targets });
+            inst.switch = Some(Box::new(SwitchPayload::Packed { first_key, targets }));
             let units = (offset - start) / 2;
             Ok(Some((inst, units)))
         }
         0x02 => {
-            let mut inst = Instruction::payload(
-                "SPARSE_SWITCH_PAYLOAD",
-                InstructionFormat::SparseSwitchPayload,
-                pc_units,
-            );
+            let mut inst =
+                Instruction::payload(InstructionFormat::SparseSwitchPayload, pc_units);
             let size = read_u16(bytes, start + 2)? as usize;
             let mut cases = Vec::with_capacity(size);
             let mut keys_offset = start + 4;
@@ -548,16 +544,12 @@ fn decode_payload(
                 keys_offset += 4;
                 targets_offset += 4;
             }
-            inst.switch = Some(SwitchPayload::Sparse { cases });
+            inst.switch = Some(Box::new(SwitchPayload::Sparse { cases }));
             let units = (targets_offset - start) / 2;
             Ok(Some((inst, units)))
         }
         0x03 => {
-            let mut inst = Instruction::payload(
-                "FILL_ARRAY_DATA_PAYLOAD",
-                InstructionFormat::ArrayPayload,
-                pc_units,
-            );
+            let mut inst = Instruction::payload(InstructionFormat::ArrayPayload, pc_units);
             let element_width = read_u16(bytes, start + 2)?;
             let size = read_u32(bytes, start + 4)?;
             let data_bytes =
@@ -575,11 +567,11 @@ fn decode_payload(
                     message: "payload truncated",
                 })?
                 .to_vec();
-            inst.array = Some(ArrayPayload {
+            inst.array = Some(Box::new(ArrayPayload {
                 element_width,
                 size,
                 data,
-            });
+            }));
             let padded_end = if data_bytes % 2 == 0 {
                 data_end
             } else {
@@ -786,7 +778,7 @@ mod tests {
         let code = code_item_from_bytes(&BYTES);
         let instructions = super::decode_stream(&code).expect("decode");
         assert!(matches!(
-            instructions[0].switch.as_ref(),
+            instructions[0].switch.as_deref(),
             Some(SwitchPayload::Packed { first_key, targets })
             if *first_key == 0x11 && targets == &vec![2]
         ));
@@ -815,7 +807,7 @@ mod tests {
         ];
         let code = code_item_from_bytes(&BYTES);
         let instructions = super::decode_stream(&code).expect("decode");
-        if let Some(SwitchPayload::Packed { first_key, targets }) = &instructions[0].switch {
+        if let Some(SwitchPayload::Packed { first_key, targets }) = &instructions[0].switch.as_deref() {
             assert_eq!(*first_key, 1);
             assert_eq!(targets, &vec![0x10, 0x20]);
         } else {

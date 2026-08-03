@@ -362,7 +362,7 @@ impl<'a> ForwardAnalysis for MethodTaintAnalysis<'a> {
     ) {
         let mut pending_source: Option<PendingSource> = None;
         for inst in instructions {
-            let name = inst.name;
+            let name = inst.name();
             let registers = referenced_registers(inst);
             if is_move_object(name) {
                 if let (Some(&dst), Some(&src)) = (registers.get(0), registers.get(1)) {

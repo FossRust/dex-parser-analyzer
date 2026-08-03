@@ -203,7 +203,7 @@ pub fn instructions_to_dto(instructions: &[Instruction]) -> Vec<DtoInstruction> 
             DtoInstruction {
                 pc: ins.pc,
                 opcode: ins.opcode,
-                name: ins.name.to_string(),
+                name: ins.name().to_string(),
                 format: format!("{:?}", ins.format),
                 registers: ins.registers.iter().copied().collect(),
                 literal: ins.literal,

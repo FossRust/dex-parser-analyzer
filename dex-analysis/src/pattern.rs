@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use aho_corasick::AhoCorasick;
+use daachorse::{ClamavFastScanner, DoubleArrayAhoCorasick, clamav_prefilter::ClamavPrefilter};
 use dex_core::{
     format::{MethodIdx, StringIdx},
     graphs,
@@ -39,8 +39,50 @@ static SECRET_REGEXES: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
     ]
 });
 
-static SECRET_KEYWORDS: Lazy<AhoCorasick> = Lazy::new(|| {
-    AhoCorasick::new([
+struct AutoMatcher {
+    pma: DoubleArrayAhoCorasick<u32>,
+    dense: Vec<u32>,
+    prefilter: Option<ClamavPrefilter>,
+}
+
+impl AutoMatcher {
+    fn new(patterns: &[&str]) -> AutoMatcher {
+        let pma = DoubleArrayAhoCorasick::with_values(
+            patterns
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.as_bytes(), i as u32)),
+        )
+        .expect("daachorse build");
+        let prefilter = {
+            let pf = ClamavPrefilter::from_patterns(
+                &patterns
+                    .iter()
+                    .map(|p| p.as_bytes().to_vec())
+                    .collect::<Vec<_>>(),
+            );
+            // is_empty() scans the whole 65536-byte table; compute it once at
+            // construction instead of on every search() call.
+            if pf.is_empty() { None } else { Some(pf) }
+        };
+        AutoMatcher {
+            dense: pma.build_dense_table(),
+            pma,
+            prefilter,
+        }
+    }
+}
+
+/// Cheap literal prefixes of [`SECRET_REGEXES`] (same order). Patterns are held
+/// lowercased and matched against a lowercased haystack (daachorse has no
+/// built-in case-insensitivity); the matched `value` is the regex index, so only
+/// the corresponding regex runs.
+static SECRET_PREFIXES: Lazy<AutoMatcher> =
+    Lazy::new(|| AutoMatcher::new(&["akia", "begin ", "xox", "eyj", "password"]));
+
+/// Case-sensitive keyword substrings used for the secret trigger test.
+static SECRET_KEYWORDS: Lazy<AutoMatcher> = Lazy::new(|| {
+    AutoMatcher::new(&[
         "password=",
         "password:",
         "secret=",
@@ -50,7 +92,6 @@ static SECRET_KEYWORDS: Lazy<AhoCorasick> = Lazy::new(|| {
         "token:",
         "authorization: basic",
     ])
-    .expect("aho-corasick build")
 });
 
 static WEAK_CRYPTO_KEYWORDS: &[(&str, &'static str)] = &[
@@ -62,6 +103,14 @@ static WEAK_CRYPTO_KEYWORDS: &[(&str, &'static str)] = &[
     ("rc2", "RC2"),
     ("ecb", "ECB"),
 ];
+
+static WEAK_CRYPTO_AC: Lazy<AutoMatcher> = Lazy::new(|| {
+    let patterns: Vec<&str> = WEAK_CRYPTO_KEYWORDS
+        .iter()
+        .map(|(needle, _)| *needle)
+        .collect();
+    AutoMatcher::new(&patterns)
+});
 
 struct MethodPattern {
     id: &'static str,
@@ -111,6 +160,7 @@ fn detect_hardcoded_secrets(
     string_map: &HashMap<u32, Vec<u32>>,
 ) {
     let mut emitted = HashSet::new();
+    let mut lower_buf = Vec::new();
     for idx in 0..dex.string_count() {
         let string_idx = StringIdx::new(idx as u32);
         let Some(value) = dex.string(string_idx) else {
@@ -119,11 +169,13 @@ fn detect_hardcoded_secrets(
         if value.trim().is_empty() {
             continue;
         }
-        if value.len() < SECRET_MIN_LENGTH && SECRET_KEYWORDS.find(value.as_bytes()).is_none() {
+        if value.len() < SECRET_MIN_LENGTH
+            && first_value(&SECRET_KEYWORDS, value.as_bytes()).is_none()
+        {
             continue;
         }
 
-        let trigger = match classify_secret(value, config.secret_min_entropy) {
+        let trigger = match classify_secret(value, config.secret_min_entropy, &mut lower_buf) {
             Some(trigger) => trigger,
             None => continue,
         };
@@ -177,8 +229,9 @@ fn detect_weak_crypto(
     string_to_methods: &HashMap<u32, Vec<u32>>,
 ) {
     let sink_lookup = build_sink_lookup(dex, xrefs);
+    let references_cipher = references_cipher_descriptor(dex);
     if sink_lookup.is_empty() {
-        if references_cipher_descriptor(dex) {
+        if references_cipher {
             findings.push(Finding {
                 id: "M10_CIPHER".into(),
                 kind: VulnerabilityKind::WeakCrypto,
@@ -234,7 +287,7 @@ fn detect_weak_crypto(
         });
     }
 
-    if !produced && references_cipher_descriptor(dex) {
+    if !produced && references_cipher {
         findings.push(Finding {
             id: "M10_CIPHER".into(),
             kind: VulnerabilityKind::WeakCrypto,
@@ -297,9 +350,16 @@ fn detect_insecure_http(
     }
 }
 
-fn build_sink_lookup<'a>(dex: &'a DexFile<'_>, xrefs: &graphs::Xrefs) -> HashMap<u32, &'a MethodPattern> {
+fn build_sink_lookup<'a>(
+    dex: &'a DexFile<'_>,
+    xrefs: &graphs::Xrefs,
+) -> HashMap<u32, &'a MethodPattern> {
     let mut lookup = HashMap::new();
-    let mut callees: Vec<u32> = xrefs.method_calls.iter().map(|(_, callee)| *callee).collect();
+    let mut callees: Vec<u32> = xrefs
+        .method_calls
+        .iter()
+        .map(|(_, callee)| *callee)
+        .collect();
     callees.sort_unstable();
     callees.dedup();
     for idx in callees {
@@ -317,14 +377,20 @@ fn build_sink_lookup<'a>(dex: &'a DexFile<'_>, xrefs: &graphs::Xrefs) -> HashMap
     lookup
 }
 
-fn classify_secret(value: &str, entropy_threshold: f32) -> Option<SecretTrigger> {
-    if let Some((label, _)) = SECRET_REGEXES
-        .iter()
-        .find(|(_, regex)| regex.is_match(value))
-    {
-        return Some(SecretTrigger::Pattern(label));
+fn classify_secret(
+    value: &str,
+    entropy_threshold: f32,
+    lower_buf: &mut Vec<u8>,
+) -> Option<SecretTrigger> {
+    if let Some(re_idx) = first_value(&SECRET_PREFIXES, lowercase_into(value, lower_buf)) {
+        if let Some((label, _)) = SECRET_REGEXES
+            .get(re_idx as usize)
+            .filter(|(_, re)| re.is_match(value))
+        {
+            return Some(SecretTrigger::Pattern(label));
+        }
     }
-    if SECRET_KEYWORDS.find(value.as_bytes()).is_some() {
+    if first_value(&SECRET_KEYWORDS, value.as_bytes()).is_some() {
         return Some(SecretTrigger::Keyword);
     }
     if value.len() >= SECRET_MIN_LENGTH {
@@ -338,20 +404,34 @@ fn classify_secret(value: &str, entropy_threshold: f32) -> Option<SecretTrigger>
 
 fn classify_weak_strings(dex: &DexFile<'_>) -> HashMap<u32, &'static str> {
     let mut map = HashMap::new();
+    let mut lower_buf = Vec::new();
     for idx in 0..dex.string_count() {
         let idx_u32 = idx as u32;
         let Some(value) = dex.string(StringIdx::new(idx_u32)) else {
             continue;
         };
-        let lower = value.to_ascii_lowercase();
-        if let Some((_, label)) = WEAK_CRYPTO_KEYWORDS
-            .iter()
-            .find(|(needle, _)| lower.contains(*needle))
-        {
-            map.insert(idx_u32, *label);
+        if let Some(idx_val) = first_value(&WEAK_CRYPTO_AC, lowercase_into(value, &mut lower_buf)) {
+            map.insert(idx_u32, WEAK_CRYPTO_KEYWORDS[idx_val as usize].1);
         }
     }
     map
+}
+
+/// Dense-scan a haystack, skipping it entirely when the single-level prefilter
+/// finds no candidate 2-gram. Returns the value of the first overlapping match.
+#[inline(always)]
+fn first_value(matcher: &AutoMatcher, haystack: &[u8]) -> Option<u32> {
+    matcher.prefilter.as_ref()?.search(haystack)?;
+    let fast = ClamavFastScanner::from_dense(&matcher.pma, &matcher.dense);
+    fast.find_iter(haystack).next().map(|m| m.value())
+}
+
+/// Lowercase `input` into `buf` (reused across calls so no per-string
+/// allocation happens) and return the lowercased bytes.
+fn lowercase_into<'a>(input: &str, buf: &'a mut Vec<u8>) -> &'a [u8] {
+    buf.clear();
+    buf.extend(input.bytes().map(|b| b.to_ascii_lowercase()));
+    &buf[..]
 }
 
 fn build_string_to_methods(xrefs: &graphs::Xrefs) -> HashMap<u32, Vec<u32>> {
